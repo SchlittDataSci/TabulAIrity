@@ -21,8 +21,8 @@ edge,Check Pathogen-Multiple Pathogens,isNo,,,,
 
 edge,Reporting Date-Case Count,,,,,
 edge,Reporting Date-Death Count,,,,,
-node,Case Count,Cast Int,a data extraction api that returns integer answers only,50,"In the following text, how many new cases of [Single Pathogen] were reported:\n[Description of the Situation]",False
-node,Death Count,Cast Int,a data extraction api that returns integer answers only,50,"In the following text, how many new deaths were attributed to the outbreak. You must return 0 if no known deaths were attribured to to the outbreak:\n[Description of the Situation]",False
+node,Case Count,castInt,a data extraction api that returns integer answers only,50,"In the following text, how many new cases of the disease were reported? You must only return the integer number with no additional text:\n[Description of the Situation]",False
+node,Death Count,castInt,a data extraction api that returns integer answers only,50,"In the following text, how many new deaths were attributed to the outbreak? You must return 0 if no known deaths were attribured to to the outbreak. You must only return the integer number with no additional text:\n[Description of the Situation]",False
 edge,Reporting Date-Reporting Agency,,,,,
 node,Reporting Agency,pass,a data extraction api that returns agency names only,50,"What agency initially reported the outbreak described in the following text? Please return only the name of the agency:\n[Description of the Situation]",False
 
