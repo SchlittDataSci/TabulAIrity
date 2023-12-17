@@ -4,3 +4,5 @@ lastplot.png
 cache/*
 tempDB.db
 *.swp
+*checkpoint*
+.DS_Store

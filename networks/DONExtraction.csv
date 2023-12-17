@@ -1,0 +1,52 @@
+type,key,fx,persona,tokens,prompt,self_eval
+
+
+node,Start,getYN,an epidemiological data extraction api that returns single words only,50,"Does this article specifically describe events relating to a novel emergence of an outbreak of infectious disease lasting less than two months? Please answer yes or no only:\n[Description of the Situation]",False
+edge,Start-New Outbreak,isYes,,,,
+edge,Start-Ongoing Epidemic,isNo,,,,
+edge,Ongoing Epidemic-Reporting Date,,,,,
+edge,New Outbreak-Reporting Date,,,,,
+node,Reporting Date,Parse Date,a data extraction api that returns minimal short answers only,50,"On what date was the outbreak reported to health agencies? You must provide a best estimated day, month, and year and list only the date in month-day-year format:\n[Description of the Situation]",False
+
+
+
+node,Ongoing Epidemic,,,,False
+node,New Outbreak,,,,,False
+edge,Ongoing Epidemic-Check Pathogen,,,,,
+edge,New Outbreak-Check Pathogen,,,,,
+node,Check Pathogen,getYN,an epidemiological data extraction api that returns single words only,50,"Does this article describe events relating to one or more cases of a singular pathogen? You may only return the words 'yes' if one pathogen is mentioned, or 'no' if many pathogens were mentioned:\n[Description of the Situation]",False
+edge,Check Pathogen-Single Pathogen,isYes,,,,
+edge,Check Pathogen-Multiple Pathogens,isNo,,,,
+
+
+edge,Reporting Date-Case Count,,,,,
+edge,Reporting Date-Death Count,,,,,
+node,Case Count,Cast Int,a data extraction api that returns integer answers only,50,"In the following text, how many new cases of [Single Pathogen] were reported:\n[Description of the Situation]",False
+node,Death Count,Cast Int,a data extraction api that returns integer answers only,50,"In the following text, how many new deaths were attributed to the outbreak. You must return 0 if no known deaths were attribured to to the outbreak:\n[Description of the Situation]",False
+edge,Reporting Date-Reporting Agency,,,,,
+node,Reporting Agency,pass,a data extraction api that returns agency names only,50,"What agency initially reported the outbreak described in the following text? Please return only the name of the agency:\n[Description of the Situation]",False
+
+
+
+edge,Start-Location,,,,,
+node,Location,pass,an epidemiological data extraction api that returns location names only,50,"Around what location(s) did this outbreak occur? You must only respond with a comma separated list of location names:\n[Description of the Situation]",False
+edge,Location-Check Locations,,,,,
+node,Check Locations,getYN,an epidemiological data extraction api that returns single words only,50,"Does the following text describe one location or many locations. You may only return the words 'yes' if one location is mentioned, or 'no' if many locations are mentioned:\n[Location]",False
+edge,Check Locations-Single Location,isYes,,,,
+edge,Check Locations-Multiple Locations,isNo,,,,
+node,Single Location,geocodeOne,null,,recall:[Location],False
+node,Multiple Locations,geocodeMany,null,,recall:[Location],False
+
+
+node,Single Pathogen,pass,an epidemiological data extraction api that returns short answers only,50,"Which specific pathogen is being described in the following body of text. Please list only the pathogen or disease with no additional descriptions:\n[Description of the Situation]",False
+edge,New Outbreak-Index Date,,,,,
+node,Index Date,Parse Date,a data extraction api that returns minimal short answers only,50,"What estimated date did the events described begin on? You must provide a best estimated day, month, and year and list only the date in month-day-year format:\n[Description of the Situation]",False
+edge,Single Pathogen-R0,,,,,
+node,R0,loadJson,"an epidemiology api which estimates pathogen's reproduction numbers and returns tuples",50,"What is the estimated basic reproduction number of [Single Pathogen]? You must return a python formatted list with two float values and no text.",False
+edge,Single Pathogen-Risk Factors,,,,,
+node,Risk Factors,standardizeList,a skilled epidemiologist writing web content,200,"Does the following text mention any specific risk factors? If so, please write a bulleted list of the top three risk factors noted. If not, please reply 'none noted'. You must not include any text beyond the risk factors of note:\n[Epidemiology]\n[WHO Risk Assessment]",False
+edge,Single Pathogen-Modes of Transmission,,,,,
+node,Modes of Transmission,standardizeList,a skilled epidemiologist writing web content,200,"Does the following text mention any specific modes of transmission by which humans are directly infected with [Single Pathogen]? If so, please write a bulleted list of the top three of transmission described in the following text using the briefest possible words or phrases. If no modes of transmission were noted, please reply 'none noted'. You must summarize each list item as a single phrase, and you must only list routes of transmission. You should not list risk avoidance practices. The relevant text is as follows:\n[Epidemiology]\n[WHO Advice]",False
+
+
+node,Multiple Pathogens,pass,an epidemiological data extraction api that returns short answers only,50,"Please return a python formatted list of all of the pathogens occuring in the following incident:\n[Description of the Situation]",False

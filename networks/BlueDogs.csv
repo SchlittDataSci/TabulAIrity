@@ -1,0 +1,14 @@
+type,key,fx,persona,tokens,prompt,self_eval
+node,Start,getYN,*role,50,"Would you like to chat? Please answer yes or no.",True
+edge,Start-Chat,isYes,,,,
+edge,Start-End,isNo,,,,
+node,End,,,,"Good bye!",False
+node,Chat,,,,"Cool, lets chat",False
+edge,Chat-1:Favorite color,,,
+edge,Chat-2:Favorite pet,,,
+edge,Chat-3:Existence check,,,
+node,1:Favorite color,getColor,*role,50,"What is your favorite color? Please list a single color.",True
+node,2:Favorite pet,dogOrCat,*role,50,"Which do you prefer, dogs or cats?",True
+node,3:Existence check,getYN,*role,50,"Do [Favorite color] [Favorite pet] exist? Please answer yes or no",True
+edge,3:Existence check-End,isYes,,,"Wow I would love to see one!",
+edge,3:Existence check-End,isNo,,,"Well that is sad...",\n
