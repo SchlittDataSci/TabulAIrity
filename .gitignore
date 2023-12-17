@@ -1,0 +1,6 @@
+login/*
+__pycache__
+lastplot.png
+cache/*
+tempDB.db
+*.swp
