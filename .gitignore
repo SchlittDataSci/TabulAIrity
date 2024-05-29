@@ -6,3 +6,10 @@ tempDB.db
 *.swp
 *checkpoint*
 .DS_Store
+examples/cache/
+*.pickle
+*.geojson
+*openai.txt
+*.pickle
+examples/input/DON*
+examples/output/DON*

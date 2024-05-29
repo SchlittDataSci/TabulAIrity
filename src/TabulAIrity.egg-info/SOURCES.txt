@@ -1,0 +1,17 @@
+.gitattributes
+.gitignore
+LICENSE
+README.md
+pyproject.toml
+requirements.txt
+examples/BlueDogsDemo.ipynb
+examples/DONScraper.ipynb
+examples/networks/BlueDogs.csv
+examples/networks/DONExtraction.csv
+src/TabulAIrity.egg-info/PKG-INFO
+src/TabulAIrity.egg-info/SOURCES.txt
+src/TabulAIrity.egg-info/dependency_links.txt
+src/TabulAIrity.egg-info/top_level.txt
+src/tabulairity/__init__.py
+src/tabulairity/chatnet.py
+src/tabulairity/chatprompts.py

@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "TabulAIrity"
+version = "1.0.0"
+authors = [
+  { name="James Schlitt", email="schlittdatasci@gmail.com" },
+]
+description = "Chat network based interrogation of unstructured text"
+readme = "README.md"
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: GPL 3",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+Homepage = "https://github.com/SchlittDataSci/TabulAIrity"
+Issues = "https://github.com/SchlittDataSci/TabulAIrity/issues"

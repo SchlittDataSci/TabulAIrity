@@ -1,0 +1,18 @@
+Metadata-Version: 2.1
+Name: TabulAIrity
+Version: 1.0.0
+Summary: Chat network based interrogation of unstructured text
+Author-email: James Schlitt <schlittdatasci@gmail.com>
+Project-URL: Homepage, https://github.com/SchlittDataSci/TabulAIrity
+Project-URL: Issues, https://github.com/SchlittDataSci/TabulAIrity/issues
+Classifier: Programming Language :: Python :: 3
+Classifier: License :: OSI Approved :: GPL 3
+Classifier: Operating System :: OS Independent
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+License-File: LICENSE
+
+# Tabulairity
+
+Slide Deck:
+[Slide Deck](https://docs.google.com/presentation/d/1A5SZgjTdp4PyHzKldXnDUMtvnwshi2Yv1uGauso26ZQ)
