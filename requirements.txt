@@ -1,4 +1,4 @@
-openai
+litellm
 cohere
 tiktoken
 pandas
