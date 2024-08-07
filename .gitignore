@@ -13,3 +13,5 @@ examples/cache/
 *.pickle
 examples/input/DON*
 examples/output/DON*
+*.json
+examples/login/credentials.txt
