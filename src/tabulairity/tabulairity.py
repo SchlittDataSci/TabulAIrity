@@ -33,7 +33,7 @@ if not os.path.exists(cachePath):
 def prepEnvironment():
     """Loads Open AI api key from local file"""
     credentialsRef = 'login/credentials.txt'
-    if os.path.exits(credentialsRef):
+    if os.path.exists(credentialsRef):
         with open('login/credentials.txt') as credentials:
             lines = credentials.readlines()
         for line in lines:
