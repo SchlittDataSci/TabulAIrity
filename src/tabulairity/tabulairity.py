@@ -337,7 +337,7 @@ def getChatContent(messages,tokens,modelName):
     content = completion(model=modelName,
                          max_tokens=int(tokens),
                          messages=messages)
-    cleaned = content.choices[0].message.content.strip()
+    cleaned = content.choices[0].message.content.strip() if content.choices[0].message.content else ''
     return cleaned
 
 
