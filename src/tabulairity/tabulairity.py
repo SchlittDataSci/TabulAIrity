@@ -356,7 +356,7 @@ def askChatQuestion(prompt,persona,tokens=200):
 
 def getYN(text):
     messages = [{'role':'system',
-                 'content':'You are a python API that standardizes yes or no answers. You may only return one word in lowercase or None as appropriate.'},
+                 'content':'You are an API that standardizes yes or no answers. You may only return a one word answer in lowercase or "None" as appropriate.'},
                 {'role':'user',
                  'content':f'Please return a value for the following text, coding the ouput as "yes" for any affirmative response, "no" for any negative response: {text}'}]
 
