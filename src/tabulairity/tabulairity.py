@@ -369,6 +369,7 @@ def getYN(text):
 
 def ynToBool(evaluation):
     textAnswer = getYN(evaluation)
+    textAnswer = ''.join(i for i in textAnswer if i.isalnum())
     result = {'y':True,
               'n':False}[textAnswer[0].lower()]
     return result
