@@ -5,7 +5,9 @@ README.md
 pyproject.toml
 requirements.txt
 dist/TabulAIrity-1.0.0-py3-none-any.whl
+dist/TabulAIrity-1.0.1-py3-none-any.whl
 dist/tabulairity-1.0.0.tar.gz
+dist/tabulairity-1.0.1.tar.gz
 examples/BlueDogsDemo.ipynb
 examples/DONScraper.ipynb
 examples/DONScraperFull.ipynb
