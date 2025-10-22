@@ -1,11 +1,14 @@
 import networkx as nx
 import pandas as pd
 
+import scrapertools as st
+
 from copy import deepcopy
 from matplotlib import pyplot as plt
 from time import sleep
 from bs4 import BeautifulSoup
 from litellm import completion
+from langdetect import detect
 
 import os
 import json
@@ -25,6 +28,7 @@ import hashlib
 
 
 cachePath = 'TabulAIrityCache'
+config = dict()
 
 if not os.path.exists(cachePath):
     os.mkdir(cachePath)
@@ -32,20 +36,29 @@ if not os.path.exists(cachePath):
 
 def prepEnvironment():
     """Loads Open AI api key from local file"""
-    credentialsRef = 'login/credentials.txt'
+    credentialsRef = 'config/environment_args.txt'
     if os.path.exists(credentialsRef):
-        with open('login/credentials.txt') as credentials:
+        with open(credentialsRef) as credentials:
             lines = credentials.readlines()
         for line in lines:
             if ' = ' in line:
                 [arg,value] = [i.strip() for i in line.split(' = ')][:2]
                 os.environ[arg] = value
     else:
-        print("Credentials file not found. If this is intentional, you must manually add LLM credentials to your system environment in order to use TabulAIrity. Please refer to: https://docs.litellm.ai/docs/.")
-    
-    
+        print("Environment args not found. If this is intentional, you must manually add LLM credentials to your system environment in order to use TabulAIrity. Otherwise, TabulAIrity will assume a local ollama installation. Please refer to: https://docs.litellm.ai/docs/.")
+
+    configRef = 'config/config.txt'
+    if os.path.exists(configRef):
+        with open(configRef) as configs:
+            lines = configs.readlines()
+        for line in lines:
+            if ' = ' in line:
+                [arg,value] = [i.strip() for i in line.split(' = ')][:2]
+                config[arg] = value
+            
+
 client = prepEnvironment()
-modelName = "gpt-4o-mini"
+modelName = "ollama/gemma3:12b"
 
 
 
@@ -295,7 +308,6 @@ def queryToCache(query,
 def scrapePage(url):
     """Pulls a beautifulsoup representation of a page"""
     response = requests.get(url)
-    sleep(2)
     statusCode = response.status_code
     if statusCode == 200:
         return response.text
@@ -306,7 +318,7 @@ def scrapePage(url):
 
 def cachePage(url):
     """Attempts to scrape a page, pulling from cache if found or caching if new and successful"""
-    result = queryToCache(f"scrapePage('{url}')")
+    result = queryToCache(f"st.scrapePageText('{url}')")
     return result
 
 
@@ -319,6 +331,86 @@ def cacheGeocode(locText):
     if type(result) not in (list,tuple):
         return None
     return list(result)
+
+
+
+#########################################
+#                                       #
+#     SELF IMPROVEMENT                  #
+#                                       #
+#########################################
+
+
+
+def rewritePrompt(prompt,persona):
+    """"Takes a given prompt and persona and returns an LLM improved version of each"""
+    questionPrompt = f"""Rewrite the following prompt text to maximize its performance according to the criteria below.
+
+Objectives:
+
+* Expand and optimize the prompt so that it consistently produces clean, structured output containing only the required data.
+* Ensure the rewritten prompt strictly forbids inclusion of any markdown, explanations, commentary, variable placeholders, or descriptive text.
+* Explicitly state in the rewritten prompt what must be included and what must not be included in the model’s output.
+* Preserve and correctly utilize all flag values indicated in square brackets [like_this].
+* Do not invent or modify any flag values.
+* Do not add or include meta-instructions, comments, or contextual discussion in the final rewritten text.
+
+The prompt being improved operates under the system prompt:
+
+{persona}
+
+Task:
+Rewrite the following prompt text (provided after this instruction block) so that it performs optimally under the criteria above.
+
+Prompt to improve:
+
+{prompt}"""
+    
+    aiPrompt = askChatQuestion(questionPrompt,'a skilled prompt engineer')
+
+    formattedPersona = f'You are {persona}. You must answer questions as {persona}.'
+
+    personaPrompt = f"""Please consider the following prompt and revise our LLM system text to maximize prompt efficiency if needed.
+The current system text is "{persona}". If you decide to replace it, your replacement should be optimized for use with LLM APIs.
+You must only return the recommended system text for our prompt.
+You absolutely must not provide descriptions or commentary.
+The prompt is as follows:
+
+{prompt}"""
+
+    aiPersona = askChatQuestion(personaPrompt,'a skilled prompt engineer')
+
+    return aiPrompt,aiPersona
+
+
+
+def autoTranslate(dfIn,
+                  column,
+                  targetLanguage = 'en',
+                  aiRewrite = True):
+    """Automatically translates all values in one column that are not in the target language"""
+    
+    df = dfIn.copy(deep=True)
+    langOut = f'{column}_language'
+    textOut = f'{column}_translated'
+    df.loc[:,langOut] = df[column].apply(detect)
+    df.loc[:,textOut] = df[column]
+
+    basePrompt = 'Please translate the following text to english: {text}'
+    basePersona = 'an efficient translation api'
+    
+    if aiRewrite:
+        newPrompt, newPersona = rewritePrompt(basePrompt,basePersona)
+        translatorFx = lambda x: askChatQuestion(newPrompt.format(text=f'\n\n{x}'),
+                                                 newPersona,
+                                                 autoformatPersona = False)
+    else:
+        translatorFx = lambda x: askChatQuestion(basePrompt.format(text=f'\n\n{x}'),
+                                                 basePersona)
+
+    df.loc[df[langOut] != targetLanguage,textOut] = df.loc[df[langOut] != 'en',textOut].apply(translatorFx)
+
+    return df
 
 
 
@@ -342,9 +434,22 @@ def getChatContent(messages,tokens,modelName):
 
 
 
-def askChatQuestion(prompt,persona,tokens=200):
+def askChatQuestion(prompt,
+                    persona,
+                    autoformatPersona = True,
+                    aiRewrite = False,
+                    tokens=200):
+    """Simple method to ask a single chat question"""
+    
+    if autoformatPersona and not aiRewrite:
+        personaText = f'You are {persona}. You must answer questions as {persona}.'
+    else:
+        personaText = persona
+        
+    #print("DEBOO", personaText)
+    
     messages = [{'role':'system',
-                 'content':f'You are {persona}. You must answer questions as {persona}.'},
+                 'content':personaText},
                 {'role':'user',
                  'content':prompt[:350000]}]
 
@@ -355,6 +460,7 @@ def askChatQuestion(prompt,persona,tokens=200):
 
 
 def getYN(text):
+    """Input cleaner to standardize yes or no answers"""
     messages = [{'role':'system',
                  'content':'You are an API that standardizes yes or no answers. You may only return a one word answer in lowercase or "None" as appropriate.'},
                 {'role':'user',
@@ -368,6 +474,7 @@ def getYN(text):
 
 
 def ynToBool(evaluation):
+    """Input cleaner to convert yes or no answers to boolean"""
     textAnswer = getYN(evaluation)
     textAnswer = ''.join(i for i in textAnswer if i.isalnum())
     result = {'y':True,
@@ -379,19 +486,6 @@ def ynToBool(evaluation):
 def evaluateAnswer(question, response):
     messages = [{'role':'system',
                  'content':'You are a debate moderator skilled at identifying the presence of answer in long statements'},
-                {'role':'user',
-                 'content':f'Please answer in one short sentence, does the following answer provide any useable answer for the provided question?\nquestion: {question}\nanswer: {response}'}]
-
-    query = f"getChatContent({messages},100,'{modelName}')"
-    result = queryToCache(query)
-
-    return result
-
-
-
-def evaluateAnswerOld(question, response):
-    messages = [{'role':'system',
-                 'content':'You are a skilled moderator of debates. You must answer questions as a skilled moderator of debates.'},
                 {'role':'user',
                  'content':f'Please answer in one short sentence, does the following answer provide any useable answer for the provided question?\nquestion: {question}\nanswer: {response}'}]
 
