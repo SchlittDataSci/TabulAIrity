@@ -33,6 +33,8 @@ config = dict()
 if not os.path.exists(cachePath):
     os.mkdir(cachePath)
 
+modelName = "gemma3:12b"
+
 
 def prepEnvironment():
     """Loads Open AI api key from local file"""
@@ -55,12 +57,35 @@ def prepEnvironment():
             if ' = ' in line:
                 [arg,value] = [i.strip() for i in line.split(' = ')][:2]
                 config[arg] = value
-            
 
-client = prepEnvironment()
-modelName = "ollama/gemma3:12b"
+    routesRef = 'config/model_routes.csv'
+    if os.path.exists(routesRef):
+        routes = pd.read_csv(routesRef).set_index('model')
+    else:
+        routes = {modelName:{'route':modelName,
+                             'ip':'http://localhost:11434'}}
+        routes = pd.DataFrame(routes).T
+
+    return routes
 
 
+modelRoutes = prepEnvironment()
+
+
+def getModelRoute(name):
+    """Model route accessor with user reminders"""
+    try:
+        route = modelRoutes.at[name,'route']
+        ip = modelRoutes.at[name,'ip']
+    except:
+        print(f"{name} not found in model routes (config/model_routes.csv), adding manually...")
+        defaultIP = 'http://localhost:11434'
+        modelRoutes.loc[name] = {'route':name,
+                                 'ip':defaultIP}
+        route = name
+        ip = defaultIP
+
+    return route, ip
 
 
 #########################################
@@ -104,6 +129,12 @@ def buildChatNet(script,show=False):
     script.fx.fillna('null', inplace = True)
     script.prompt.fillna('', inplace = True)
     script.self_eval.fillna(False, inplace = True)
+    
+    if 'model' not in script.columns:
+        script.iloc[:,'model'] = modelName
+    script.model.iloc[0] = modelName
+    script.model = script.model.ffill()
+    
     chatEdges = script[script.type == 'edge']
     chatNodes = script[script.type == 'node']
     G = nx.MultiDiGraph()
@@ -189,13 +220,16 @@ def walkChatNet(G,
 
         tokens = nodeVars['tokens']
         persona = nodeVars['persona']
+        rowModel = nodeVars['model']
+        
         failed = False
 
         if validRun(persona,prompt):
             if not str(prompt).startswith('recall:'):
                 chatResponse = askChatQuestion(prompt,
-                                                   persona,
-                                                   tokens)
+                                               persona,
+                                               model=rowModel,
+                                               tokens=tokens)
             else:
                 chatResponse = prompt[7:].strip()
                 if verbosity > 0:
@@ -342,7 +376,9 @@ def cacheGeocode(locText):
 
 
 
-def rewritePrompt(prompt,persona):
+def rewritePrompt(prompt,
+                  persona,
+                  model=modelName):
     """"Takes a given prompt and persona and returns an LLM improved version of each"""
     questionPrompt = f"""Rewrite the following prompt text to maximize its performance according to the criteria below.
 
@@ -366,9 +402,9 @@ Prompt to improve:
 
 {prompt}"""
     
-    aiPrompt = askChatQuestion(questionPrompt,'a skilled prompt engineer')
-
-    formattedPersona = f'You are {persona}. You must answer questions as {persona}.'
+    aiPrompt = askChatQuestion(questionPrompt,
+                               'a skilled prompt engineer',
+                               model=model)
 
     personaPrompt = f"""Please consider the following prompt and revise our LLM system text to maximize prompt efficiency if needed.
 The current system text is "{persona}". If you decide to replace it, your replacement should be optimized for use with LLM APIs.
@@ -378,7 +414,9 @@ The prompt is as follows:
 
 {prompt}"""
 
-    aiPersona = askChatQuestion(personaPrompt,'a skilled prompt engineer')
+    aiPersona = askChatQuestion(personaPrompt,
+                                'a skilled prompt engineer',
+                                model=model)
 
     return aiPrompt,aiPersona
 
@@ -387,6 +425,7 @@ The prompt is as follows:
 def autoTranslate(dfIn,
                   column,
                   targetLanguage = 'en',
+                  model = modelName,
                   aiRewrite = True):
     """Automatically translates all values in one column that are not in the target language"""
     
@@ -403,10 +442,12 @@ def autoTranslate(dfIn,
         newPrompt, newPersona = rewritePrompt(basePrompt,basePersona)
         translatorFx = lambda x: askChatQuestion(newPrompt.format(text=f'\n\n{x}'),
                                                  newPersona,
+                                                 model = modelName,
                                                  autoformatPersona = False)
     else:
         translatorFx = lambda x: askChatQuestion(basePrompt.format(text=f'\n\n{x}'),
-                                                 basePersona)
+                                                 basePersona,
+                                                 model = modelName)
 
     df.loc[df[langOut] != targetLanguage,textOut] = df.loc[df[langOut] != 'en',textOut].apply(translatorFx)
 
@@ -426,9 +467,11 @@ def autoTranslate(dfIn,
 
 def getChatContent(messages,tokens,modelName):
     """Wrapper to load chat content from OpenAI"""
-    content = completion(model=modelName,
+    modelRoute, ip = getModelRoute(modelName)
+    content = completion(model=modelRoute,
                          max_tokens=int(tokens),
-                         messages=messages)
+                         messages=messages,
+                         api_base=ip)
     cleaned = content.choices[0].message.content.strip() if content.choices[0].message.content else ''
     return cleaned
 
@@ -436,6 +479,7 @@ def getChatContent(messages,tokens,modelName):
 
 def askChatQuestion(prompt,
                     persona,
+                    model = modelName,
                     autoformatPersona = True,
                     aiRewrite = False,
                     tokens=200):
@@ -445,15 +489,13 @@ def askChatQuestion(prompt,
         personaText = f'You are {persona}. You must answer questions as {persona}.'
     else:
         personaText = persona
-        
-    #print("DEBOO", personaText)
-    
+            
     messages = [{'role':'system',
                  'content':personaText},
                 {'role':'user',
                  'content':prompt[:350000]}]
 
-    query = f"getChatContent({messages},{tokens},'{modelName}')"
+    query = f"getChatContent({messages},{tokens},'{model}')"
     result = queryToCache(query)
     return result
 
