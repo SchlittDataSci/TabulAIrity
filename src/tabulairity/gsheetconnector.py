@@ -23,7 +23,10 @@ def feedToDf(feedURL):
     """Takes a google alerts feed url and returns an article df"""
     keepCols = ['link','title','published','updated','summary']
     feed = feedparser.parse(feedURL)
-    feedDf = pd.DataFrame(feed['entries'])[keepCols]
+    entries = feed['entries']
+    if entries == []:
+        return pd.DataFrame(keepCols)
+    feedDf = pd.DataFrame(entries)[keepCols]
     feedDf.loc[:,'url'] = feedDf.link.apply(getGALink)
     feedDf.summary = feedDf.summary.apply(stripHTML)
     feedDf.title = feedDf.title.apply(stripHTML)

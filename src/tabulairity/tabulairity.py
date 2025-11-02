@@ -9,13 +9,16 @@ from time import sleep
 from bs4 import BeautifulSoup
 from litellm import completion
 from langdetect import detect
+from random import uniform, randint
 
 import os
+import re
 import json
 import requests
 import osmnx
 import pickle
 import hashlib
+import pycountry
 
 
 
@@ -34,6 +37,9 @@ if not os.path.exists(cachePath):
     os.mkdir(cachePath)
 
 modelName = "gemma3:12b"
+maxTranslateTokens = 8000
+targetLanguage = 'en'
+translationModel = "gemma3:12b"
 
 
 def prepEnvironment():
@@ -159,12 +165,9 @@ def buildChatNet(script,show=False):
     
     if show:
         pos = nx.kamada_kawai_layout(G)
-        #pos = nx.fruchterman_reingold_layout(G)
-        #pos['start'] = (0,0)
         pos = nx.spring_layout(G,
                                pos=pos,
                                iterations=10)
-        #pos['start'] = (0,0)
         colors = [mapEdgeColor(i[2]) for i in G.edges]
 
         fig,ax = plt.subplots(figsize=(10,10))
@@ -283,7 +286,7 @@ def walkChatNet(G,
 
 #########################################
 #                                       #
-#     OPEN AI CACHING FUNCTIONS         #
+#     QUERY CACHING FUNCTIONS           #
 #                                       #
 #########################################
 
@@ -356,6 +359,7 @@ def cachePage(url):
     return result
 
 
+
 def cacheGeocode(locText):
     """Attempts to geocode a location via osmnx"""
     try:
@@ -370,56 +374,29 @@ def cacheGeocode(locText):
 
 #########################################
 #                                       #
-#     SELF IMPROVEMENT                  #
+#     LANGUAGE HANDLING                 #
 #                                       #
 #########################################
 
 
+def getLanguageName(code):
+    """Returns language name from language codes, defaulting to english"""
+    lang = pycountry.languages.get(alpha_2=code)
+    return lang.name if lang else "English"
 
-def rewritePrompt(prompt,
-                  persona,
-                  model=modelName):
-    """"Takes a given prompt and persona and returns an LLM improved version of each"""
-    questionPrompt = f"""Rewrite the following prompt text to maximize its performance according to the criteria below.
 
-Objectives:
-
-* Expand and optimize the prompt so that it consistently produces clean, structured output containing only the required data.
-* Ensure the rewritten prompt strictly forbids inclusion of any markdown, explanations, commentary, variable placeholders, or descriptive text.
-* Explicitly state in the rewritten prompt what must be included and what must not be included in the model’s output.
-* Preserve and correctly utilize all flag values indicated in square brackets [like_this].
-* Do not invent or modify any flag values.
-* Do not add or include meta-instructions, comments, or contextual discussion in the final rewritten text.
-
-The prompt being improved operates under the system prompt:
-
-{persona}
-
-Task:
-Rewrite the following prompt text (provided after this instruction block) so that it performs optimally under the criteria above.
-
-Prompt to improve:
-
-{prompt}"""
+def translateOne(text):
+    """Global arg-heavy text translation function"""
+    languageName = getLanguageName(targetLanguage)
+    translationPersona = f"You are a highly accurate and fluent {languageName} translator."
+    translationPrompt = f"Translate the following text to {languageName}. Output only the translated text. Do not include any markdown, explanations, commentary, variable placeholders, or descriptive text.\n\n{text.strip()}"
     
-    aiPrompt = askChatQuestion(questionPrompt,
-                               'a skilled prompt engineer',
-                               model=model)
-
-    personaPrompt = f"""Please consider the following prompt and revise our LLM system text to maximize prompt efficiency if needed.
-The current system text is "{persona}". If you decide to replace it, your replacement should be optimized for use with LLM APIs.
-You must only return the recommended system text for our prompt.
-You absolutely must not provide descriptions or commentary.
-The prompt is as follows:
-
-{prompt}"""
-
-    aiPersona = askChatQuestion(personaPrompt,
-                                'a skilled prompt engineer',
-                                model=model)
-
-    return aiPrompt,aiPersona
-
+    translation = askChatQuestion(translationPrompt,
+                                  translationPersona,
+                                  tokens = maxTranslateTokens,
+                                  autoformatPersona = False,
+                                  model = translationModel)
+    return translation
 
 
 def autoTranslate(dfIn,
@@ -434,25 +411,9 @@ def autoTranslate(dfIn,
     textOut = f'{column}_translated'
     df.loc[:,langOut] = df[column].apply(detect)
     df.loc[:,textOut] = df[column]
-
-    basePrompt = 'Please translate the following text to english: {text}'
-    basePersona = 'an efficient translation api'
-    
-    if aiRewrite:
-        newPrompt, newPersona = rewritePrompt(basePrompt,basePersona)
-        translatorFx = lambda x: askChatQuestion(newPrompt.format(text=f'\n\n{x}'),
-                                                 newPersona,
-                                                 model = modelName,
-                                                 autoformatPersona = False)
-    else:
-        translatorFx = lambda x: askChatQuestion(basePrompt.format(text=f'\n\n{x}'),
-                                                 basePersona,
-                                                 model = modelName)
-
-    df.loc[df[langOut] != targetLanguage,textOut] = df.loc[df[langOut] != 'en',textOut].apply(translatorFx)
+    df.loc[df[langOut] != targetLanguage,textOut] = df.loc[df[langOut] != targetLanguage,textOut].apply(translateOne)
 
     return df
-
 
 
 
@@ -464,14 +425,38 @@ def autoTranslate(dfIn,
 
 
 
+def testRoutes(query = 'How many Rs are there in strawberry?',
+               persona = 'an AI assistant',
+               autoformatPersona = True):
+    """Quick method to test models from config/model_routes.py"""
+    working = []
+    for model in tb.modelRoutes.index.sort_values():
+        try:
+            response = tb.askChatQuestion(query,
+                                          persona,
+                                          autoformatPersona = autoformatPersona,
+                                          model = model)
+            print(f'{model} ~ {response}\n')
+            working.append(model)
+        except:
+            print(f'{model} ~ FAILS\n')
+    return working
 
-def getChatContent(messages,tokens,modelName):
+
+
+def getChatContent(messages,
+                   tokens,
+                   modelName,
+                   temperature = None,
+                   seed = None):
     """Wrapper to load chat content from OpenAI"""
     modelRoute, ip = getModelRoute(modelName)
-    content = completion(model=modelRoute,
-                         max_tokens=int(tokens),
-                         messages=messages,
-                         api_base=ip)
+    content = completion(model = modelRoute,
+                         max_tokens = int(tokens),
+                         messages = messages,
+                         api_base = ip,
+                         seed = seed,
+                         temperature = temperature)
     cleaned = content.choices[0].message.content.strip() if content.choices[0].message.content else ''
     return cleaned
 
@@ -482,20 +467,22 @@ def askChatQuestion(prompt,
                     model = modelName,
                     autoformatPersona = True,
                     aiRewrite = False,
-                    tokens=200):
+                    tokens = 200,
+                    temperature = None,
+                    seed = None):
     """Simple method to ask a single chat question"""
     
     if autoformatPersona and not aiRewrite:
         personaText = f'You are {persona}. You must answer questions as {persona}.'
     else:
         personaText = persona
-            
+    
     messages = [{'role':'system',
                  'content':personaText},
                 {'role':'user',
                  'content':prompt[:350000]}]
 
-    query = f"getChatContent({messages},{tokens},'{model}')"
+    query = f"getChatContent({messages},{tokens},'{model}',{temperature},{seed})"
     result = queryToCache(query)
     return result
 
