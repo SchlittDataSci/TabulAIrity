@@ -2,7 +2,6 @@ import re
 import tabulairity as tb
 
 
-
 def evaluateAnswer(originalPrompt,
                    originalPersona,
                    model,
@@ -10,8 +9,7 @@ def evaluateAnswer(originalPrompt,
     try:
         answer = tb.askChatQuestion(originalPrompt,
                                     originalPersona,
-                                    model,
-                                    autoformatPersona = False)
+                                    model)
 
         evaluationPersona = "You are an expert evaluator."
         evaluationPrompt = f""""You will be given:  
@@ -46,8 +44,7 @@ or
 "no" """
         evaluation = tb.askChatQuestion(evaluationPrompt,
                                         evaluationPersona,
-                                        supervisor,
-                                        autoformatPersona = False)
+                                        supervisor)
         answeredCorrectly = tb.ynToBool(evaluation)
     except:
         answeredCorrectly = False
@@ -84,6 +81,5 @@ You will be given a **Prompt**, and your task is to write **one single sentence*
 "The intent of this prompt is to [describe the task]."""
     intent = tb.askChatQuestion(intentPrompt,
                                 evaluationPersona,
-                                model,
-                                autoformatPersona = False)
+                                model)
     return intent

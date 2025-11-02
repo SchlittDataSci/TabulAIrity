@@ -385,6 +385,7 @@ def getLanguageName(code):
     return lang.name if lang else "English"
 
 
+
 def translateOne(text):
     """Global arg-heavy text translation function"""
     languageName = getLanguageName(targetLanguage)
@@ -394,7 +395,6 @@ def translateOne(text):
     translation = askChatQuestion(translationPrompt,
                                   translationPersona,
                                   tokens = maxTranslateTokens,
-                                  autoformatPersona = False,
                                   model = translationModel)
     return translation
 
@@ -402,8 +402,7 @@ def translateOne(text):
 def autoTranslate(dfIn,
                   column,
                   targetLanguage = 'en',
-                  model = modelName,
-                  aiRewrite = True):
+                  model = modelName):
     """Automatically translates all values in one column that are not in the target language"""
     
     df = dfIn.copy(deep=True)
@@ -466,13 +465,12 @@ def askChatQuestion(prompt,
                     persona,
                     model = modelName,
                     autoformatPersona = True,
-                    aiRewrite = False,
                     tokens = 200,
                     temperature = None,
                     seed = None):
     """Simple method to ask a single chat question"""
     
-    if autoformatPersona and not aiRewrite:
+    if autoformatPersona is None and persona.strip()[-1] != '.':
         personaText = f'You are {persona}. You must answer questions as {persona}.'
     else:
         personaText = persona
