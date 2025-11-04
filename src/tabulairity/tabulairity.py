@@ -132,14 +132,12 @@ def mapEdgeColor(fx):
     
 def buildChatNet(script,show=False):
     """Builds a chat network from a formatted csv"""
-    script.fx.fillna('null', inplace = True)
-    script.prompt.fillna('', inplace = True)
-    script.self_eval.fillna(False, inplace = True)
+    script['fx'] = script['fx'].fillna('null')
+    script['prompt'] = script['prompt'].fillna('')
+    script['self_eval'] = script['self_eval'].fillna(False)
     
     if 'model' not in script.columns:
-        script.iloc[:,'model'] = modelName
-    script.model.iloc[0] = modelName
-    script.model = script.model.ffill()
+        script.loc[:,'model'] = modelName
     
     chatEdges = script[script.type == 'edge']
     chatNodes = script[script.type == 'node']
@@ -150,7 +148,8 @@ def buildChatNet(script,show=False):
                    'fx':row['fx'],
                    'persona':row['persona'],
                    'tokens':row['tokens'],
-                   'self_eval':row['self_eval']}) for index,row in chatNodes.T.items()]
+                   'self_eval':row['self_eval'],
+                   'model':row['model']}) for index,row in chatNodes.T.items()]
 
     G.add_nodes_from(nodesParsed)
 
@@ -204,6 +203,13 @@ def insertChatVars(text,varStore):
 
 
 
+def extractChatVars(text): 
+    """Returns the set of chatvars from a prompt"""
+    matches = set(re.findall(r"\[([^\[\]]*(?:\[[^\[\]]*\][^\[\]]*)*)\]", text))
+    return matches
+
+
+    
 def walkChatNet(G,
                 fxStore=dict(),
                 varStore=dict(),
