@@ -209,6 +209,12 @@ def extractChatVars(text):
     return matches
 
 
+baseFx = {'isYes':lambda x,y: ynToBool(x),
+          'isNo':lambda x,y: not ynToBool(x),
+          'getYN':lambda x,y: getYN(x),
+          'null':lambda x,y: True,
+          'pass':lambda x:y: x}
+
     
 def walkChatNet(G,
                 fxStore=dict(),
@@ -216,8 +222,7 @@ def walkChatNet(G,
                 verbosity=1):
     """Walks the chat network, interrogating data through all available paths"""
     toAsk = ['Start']
-    fxStore['null'] =  lambda x,y:True
-    fxStore['pass'] =  lambda x,y:x
+    fxStore = fxStore | baseFx
     chatVars = deepcopy(varStore)
     while toAsk != []:
         nextQ = toAsk.pop()

@@ -140,10 +140,6 @@ def evaluateAnswer(originalPrompt,
                    supervisor):
     """Evaluates the y/n correctness of an answer, returning an explanation of the error if found"""
     
-    chatFx = {'isYes':lambda x,y:tb.ynToBool(x),
-              'isNo':lambda x,y:not tb.ynToBool(x),
-              'getYN':lambda x,y:tb.getYN(x)}
-    
     try:
         preppedPrompt = tb.insertChatVars(originalPrompt,varsIn)
         answer = tb.askChatQuestion(preppedPrompt,
@@ -157,7 +153,6 @@ def evaluateAnswer(originalPrompt,
         varsOut = dict(varsIn) | answerVars
         evaluation = tb.walkChatNet(evaluatorNet,
                                     varStore = varsOut,
-                                    fxStore = chatFx,
                                     verbosity = 0)
         if tb.ynToBool(evaluation['Start']):
             answeredCorrectly = True
