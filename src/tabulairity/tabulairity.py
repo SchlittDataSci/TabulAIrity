@@ -1,8 +1,10 @@
 import networkx as nx
 import pandas as pd
+import numpy as np
 
 import scrapertools as st
 
+from datetime import datetime
 from copy import deepcopy
 from matplotlib import pyplot as plt
 from time import sleep
@@ -66,7 +68,9 @@ def prepEnvironment():
 
     routesRef = 'config/model_routes.csv'
     if os.path.exists(routesRef):
-        routes = pd.read_csv(routesRef).set_index('model')
+        routes = pd.read_csv(routesRef)
+        routes = routes.replace({np.nan: None, 'remote': None})
+        routes['last used'] = datetime.utcnow()
     else:
         routes = {modelName:{'route':modelName,
                              'ip':'http://localhost:11434'}}
@@ -78,21 +82,38 @@ def prepEnvironment():
 modelRoutes = prepEnvironment()
 
 
+
 def getModelRoute(name):
-    """Model route accessor with user reminders"""
-    try:
-        route = modelRoutes.at[name,'route']
-        ip = modelRoutes.at[name,'ip']
-    except:
+    """Model route accessor with LRU (least recently used) logic and user reminders"""
+    global modelRoutes  # assume global persistence
+
+    for col in ['route', 'ip', 'last used']:
+        if col not in modelRoutes.columns:
+            modelRoutes[col] = None
+
+    matches = modelRoutes.loc[modelRoutes['model'] == name]
+
+    if matches.empty:
         print(f"{name} not found in model routes (config/model_routes.csv), adding manually...")
-        defaultIP = 'http://localhost:11434'
-        modelRoutes.loc[name] = {'route':name,
-                                 'ip':defaultIP}
-        route = name
-        ip = defaultIP
+        if 'ollama/' in name:
+            defaultIP = 'http://localhost:11434'
+        else:
+            defaultIP = None
 
-    return route, ip
+        modelRoutes.loc[name] = {'route': name, 'ip': defaultIP, 'last used': datetime.utcnow()}
+        return name, defaultIP
 
+    if len(matches) > 1:
+        route_row = matches.loc[matches['last used'].idxmin()] if matches['last used'].notnull().any() else matches.iloc[0]
+    else:
+        route_row = matches.iloc[0]
+
+    modelRoutes.at[route_row.name, 'last used'] = datetime.utcnow()
+
+    return route_row['route'], route_row['ip']
+
+
+    
 
 #########################################
 #                                       #
@@ -213,7 +234,7 @@ baseFx = {'isYes':lambda x,y: ynToBool(x),
           'isNo':lambda x,y: not ynToBool(x),
           'getYN':lambda x,y: getYN(x),
           'null':lambda x,y: True,
-          'pass':lambda x:y: x}
+          'pass':lambda x,y: x}
 
     
 def walkChatNet(G,
@@ -475,13 +496,13 @@ def getChatContent(messages,
 def askChatQuestion(prompt,
                     persona,
                     model = modelName,
-                    autoformatPersona = True,
+                    autoformatPersona = None,
                     tokens = 200,
                     temperature = None,
                     seed = None):
     """Simple method to ask a single chat question"""
     
-    if autoformatPersona is None and persona.strip()[-1] != '.':
+    if autoformatPersona is True and persona.strip()[-1] != '.':
         personaText = f'You are {persona}. You must answer questions as {persona}.'
     else:
         personaText = persona

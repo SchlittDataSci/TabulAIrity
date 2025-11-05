@@ -16,7 +16,7 @@ from time import sleep
 #########################################
 
 
-getGALink = lambda x: x.replace('https://www.google.com/url?rct=j&sa=t&url=','').split('&ct=ga')[0]
+getGALink = lambda x: x.replace('https://www.google.com/url?rct=j&sa=t&url=','').split('&ct=ga')[0].split('%')[0]
 stripHTML = lambda x: re.sub(r'<.*?>', '', x)
 
 def feedToDf(feedURL):
@@ -61,6 +61,9 @@ def getGAlerts(alertsDf):
     mergedFeeds = mergedFeeds.merge(alertsDf)
     mergedFeeds['scraped_text'] = mergedFeeds.url.apply(tb.cachePage)
     mergedFeeds['viable_page'] = mergedFeeds.scraped_text.apply(checkViability)
+    mergedFeeds['domain'] = mergedFeeds.url.str.split('/').str[2]
+    mergedFeeds = mergedFeeds.groupby(['title','domain']).first().reset_index()
+    mergedFeeds = mergedFeeds.groupby('url').first().reset_index()
 
     return mergedFeeds
 
