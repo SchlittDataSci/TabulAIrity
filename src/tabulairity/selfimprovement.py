@@ -7,6 +7,22 @@ import gsheetconnector as gs
 
 
 
+def getSeedParams(randomize, model):
+    """Returns seed text and string depending on model"""
+    seedSupported = not model.startswith('gemini')
+    if not randomize:
+        seed = None
+        seedText = ''
+    if seedSupported:
+        seed = randint(0,9999)
+        seedText = ''
+    else:
+        seed = None
+        seedText = f'(random seed = {randInt(0,9999)})'
+    return seed, seedText
+
+
+
 def getEvaluatorNet(supervisor='gemma3:27b'):
     """Pulls and preps true/false evaluation net"""
     evaluatorNetDf = gs.gSheetToDf('Google Alerts Trackers',
@@ -29,6 +45,7 @@ def rewritePrompt(prompt,
                   errorSummary = None,
                   randomize = True):
     """"Takes a given prompt and persona and returns an LLM improved version of each"""
+    
     if intentPrompt is None:
         intentPrompt = ''
     else:
@@ -38,11 +55,7 @@ def rewritePrompt(prompt,
     else:
         errorSummary = ' ' + errorSummary
 
-    if randomize:
-        seed = randint(0,9999)
-    else:
-        seed = None
-
+    seed, seedText = getSeedParams(randomize,model)
     keptAllVars = False
     originalVars = tb.extractChatVars(prompt)
     tries = 0
@@ -65,7 +78,8 @@ The prompt being improved operates under the system prompt:
 
 Task:
 Rewrite the following prompt text (provided after this instruction block) so that it performs optimally under the criteria above.
-
+You absolutely must not provide descriptions or commentary.
+{seedText}
 Prompt to improve:
 
 {prompt}"""
@@ -88,7 +102,7 @@ Prompt to improve:
 The current system text is "{persona}". {intentPrompt}{errorSummary}If you decide to replace it, your replacement should be optimized for use with LLM APIs.
 You must only return the recommended system text for our prompt.
 You absolutely must not provide descriptions or commentary.
-
+{seedText}
 {prompt}"""
 
     aiPersona = tb.askChatQuestion(personaPrompt,
@@ -102,6 +116,8 @@ def summarizeErrors(errors,
                     intent,
                     model):
     persona = "You are a skilled evaluator."
+    seed, seedText = getSeedParams(True,model)
+
     errorPrompt = f"""You will be given a bulleted list of previously logged prompt errors.
 
 Your task is to:
@@ -110,7 +126,7 @@ Your task is to:
      "This prompt has had issues with"
 2. Follow the summary with a single sentence suggesting how the prompt could be improved to prevent these issues.
 3. This sentence should not contradict the original intent of the prompt, stated as follows:
-[INTENT STATEMENT]
+### INTENT STATEMENT:
 {intent}
 
 Example:
@@ -119,13 +135,13 @@ If the errors involve missing context or ambiguous instructions, your output mig
 It could be improved by explicitly defining the input format and desired output behavior."
 
 Now produce your summary and improvement suggestion based on the provided error list.
-
-[ERROR LIST - BULLETED]
+{seedText}
+### ERROR LIST - BULLETED:
 {errors}"""
     errorSummary = tb.askChatQuestion(errorPrompt,
                                       'You are a skilled evaluator.',
                                       model = model,
-                                      seed = randint(0,9999))
+                                      seed = seed)
     while '\n\n' in errorSummary:
         errorSummary = errorSummary.replace('\n\n','\n')
     errorSummary = errorSummary.replace('.\n','. ')
@@ -146,14 +162,12 @@ def evaluateAnswer(originalPrompt,
                                     persona,
                                     model)
         
-        #print("DEBOO1")
         answerVars = {'preppedPrompt':preppedPrompt,
                       'answer':answer}
-        #print(answerVars)
         varsOut = dict(varsIn) | answerVars
         evaluation = tb.walkChatNet(evaluatorNet,
                                     varStore = varsOut,
-                                    verbosity = 0)
+                                    verbosity = 1)
         if tb.ynToBool(evaluation['Start']):
             answeredCorrectly = True
             explanation = None
@@ -218,6 +232,11 @@ def iteratePrompt(bestPrompt,
         intent = extractIntent(bestPrompt, supervisor)
 
     testDf = testDfIn.copy(deep=True)
+    varsInData = set(testDf.columns)
+    varsInPrompt = set(tb.extractChatVars(bestPrompt))
+    missingVars = varsInPrompt.difference(varsInData)
+    if len(missingVars) != 0:
+        print(f"Warning: some prompt vars were not found in passed data frame.\n\t{missingVars}")
 
     # Evaluate initial prompt
     bestErrors = []

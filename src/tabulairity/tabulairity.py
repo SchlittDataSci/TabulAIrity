@@ -87,7 +87,7 @@ def getModelRoute(name):
     """Model route accessor with LRU (least recently used) logic and user reminders"""
     global modelRoutes  # assume global persistence
 
-    for col in ['route', 'ip', 'last used']:
+    for col in ['model', 'route', 'ip', 'last used']:
         if col not in modelRoutes.columns:
             modelRoutes[col] = None
 
@@ -100,17 +100,27 @@ def getModelRoute(name):
         else:
             defaultIP = None
 
-        modelRoutes.loc[name] = {'route': name, 'ip': defaultIP, 'last used': datetime.utcnow()}
+        modelRoutes.loc[len(modelRoutes)] = {'model': name,
+                                             'route': name,
+                                             'ip': defaultIP,
+                                             'last used': datetime.utcnow()}
         return name, defaultIP
 
     if len(matches) > 1:
-        route_row = matches.loc[matches['last used'].idxmin()] if matches['last used'].notnull().any() else matches.iloc[0]
+        temp = matches.copy()
+        temp['last used'] = pd.to_datetime(temp['last used'], errors='coerce')
+        if temp['last used'].notnull().any():
+            chosenIdx = temp['last used'].idxmin()  # this is the actual index in modelRoutes
+        else:
+            chosenIdx = temp.index[0]
+        routeRow = modelRoutes.loc[chosenIdx]
     else:
-        route_row = matches.iloc[0]
+        chosenIdx = matches.index[0]
+        routeRow = modelRoutes.loc[chosenIdx]
 
-    modelRoutes.at[route_row.name, 'last used'] = datetime.utcnow()
+    modelRoutes.at[chosenIdx, 'last used'] = datetime.utcnow()
 
-    return route_row['route'], route_row['ip']
+    return routeRow['route'], routeRow['ip']
 
 
     
@@ -268,7 +278,6 @@ def walkChatNet(G,
             else:
                 chatResponse = prompt[7:].strip()
                 if verbosity > 0:
-                    print(prompt)
                     print(chatResponse)
                 
             chatVars[nextQ+'_prompt'] = prompt
