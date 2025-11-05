@@ -7,8 +7,6 @@ import gsheetconnector as gs
 
 
 
-
-
 def getEvaluatorNet(supervisor='gemma3:27b'):
     """Pulls and preps true/false evaluation net"""
     evaluatorNetDf = gs.gSheetToDf('Google Alerts Trackers',
@@ -100,11 +98,9 @@ You absolutely must not provide descriptions or commentary.
     
     return aiPrompt, aiPersona
 
-
-
 def summarizeErrors(errors,
+                    intent,
                     model):
-    """Summarizes a bulleted list of errors"""
     persona = "You are a skilled evaluator."
     errorPrompt = f"""You will be given a bulleted list of previously logged prompt errors.
 
@@ -113,6 +109,9 @@ Your task is to:
    - Your summary must begin with the phrase:
      "This prompt has had issues with"
 2. Follow the summary with a single sentence suggesting how the prompt could be improved to prevent these issues.
+3. This sentence should not contradict the original intent of the prompt, stated as follows:
+[INTENT STATEMENT]
+{intent}
 
 Example:
 If the errors involve missing context or ambiguous instructions, your output might be:
@@ -126,6 +125,9 @@ Now produce your summary and improvement suggestion based on the provided error 
     errorSummary = tb.askChatQuestion(errorPrompt,
                                       'You are a skilled evaluator.',
                                       model = model)
+    while '\n\n' in errorSummary:
+        errorSummary = errorSummary.replace('\n\n','\n')
+    errorSummary = errorSummary.replace('.\n','. ')
     return errorSummary
 
 
@@ -141,7 +143,7 @@ def evaluateAnswer(originalPrompt,
               'isNo':lambda x,y:not tb.ynToBool(x),
               'getYN':lambda x,y:tb.getYN(x)}
     
-    if True:
+    try:
         preppedPrompt = tb.insertChatVars(originalPrompt,varsIn)
         answer = tb.askChatQuestion(preppedPrompt,
                                     persona,
@@ -162,12 +164,12 @@ def evaluateAnswer(originalPrompt,
         else:
             answeredCorrectly = False
             explanation = evaluation['Explain error']
-    else:
+    except Exception as e:
+        print("Error:",e)
         answeredCorrectly = False
-        explantion = None
+        explanation = None
         
     return answeredCorrectly, explanation
-
 
 
 def extractIntent(prompt,
@@ -201,6 +203,7 @@ You will be given a **Prompt**, and your task is to write **one single sentence*
                                 model,
                                 autoformatPersona = False)
     return intent
+                           
                                 
 
     
@@ -235,6 +238,10 @@ def iteratePrompt(bestPrompt,
 
     bestScore = float(sum(bestScores) / len(bestScores))
     initialScore = bestScore
+    history = [{'prompt':bestPrompt,
+                'persona':bestPersona,
+                'score':bestScore,
+                'iteration':0}]
 
     if bestScore == 1:
         print("All responses flagged as correct, returning finalized prompt and persona.")
@@ -263,23 +270,30 @@ def iteratePrompt(bestPrompt,
                 newErrors.append(error)
 
         newScore = float(sum(newScores) / len(newScores))
+        print(f"Best score: {bestScore}    New score: {newScore}")
 
         if newScore > bestScore:
             bestScore = newScore
             bestPrompt = newPrompt
             bestPersona = newPersona
             bestErrors = newErrors
+            history.append({'prompt':bestPrompt,
+                            'persona':bestPersona,
+                            'score':bestScore,
+                            'iteration':0})
 
         if bestScore == 1:
             print("All responses flagged as correct, returning finalized prompt and persona.")
-            return bestPrompt, bestPersona
+            return pd.DataFrame(history)
 
-        print(f"Best score: {bestScore}    New score: {newScore}")
+
         errorList = '\n'.join([f'* {iError}' for iError in set(bestErrors)])
-        errorReport = summarizeErrors(errorList, supervisor)
+        errorReport = summarizeErrors(errorList,
+                                      intent,
+                                      supervisor)
         errorReport = f'The current prompt yields {round(bestScore,2)*100}% accuracy. {errorReport}'
         print(errorReport)
 
 
     print(f"Iterations complete, initial score: {initialScore}   final score: {bestScore}")
-    return bestPrompt, bestPersona
+    return pd.DataFrame(history)
