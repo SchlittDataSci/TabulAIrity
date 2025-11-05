@@ -125,7 +125,7 @@ Now produce your summary and improvement suggestion based on the provided error 
     errorSummary = tb.askChatQuestion(errorPrompt,
                                       'You are a skilled evaluator.',
                                       model = model,
-                                      seed = randint(0,9999)
+                                      seed = randint(0,9999))
     while '\n\n' in errorSummary:
         errorSummary = errorSummary.replace('\n\n','\n')
     errorSummary = errorSummary.replace('.\n','. ')
