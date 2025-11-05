@@ -39,7 +39,7 @@ def rewritePrompt(prompt,
         errorSummary = ' ' + errorSummary
 
     if randomize:
-        seed = randint(0,10000)
+        seed = randint(0,9999)
     else:
         seed = None
 
@@ -124,7 +124,8 @@ Now produce your summary and improvement suggestion based on the provided error 
 {errors}"""
     errorSummary = tb.askChatQuestion(errorPrompt,
                                       'You are a skilled evaluator.',
-                                      model = model)
+                                      model = model,
+                                      seed = randint(0,9999)
     while '\n\n' in errorSummary:
         errorSummary = errorSummary.replace('\n\n','\n')
     errorSummary = errorSummary.replace('.\n','. ')
