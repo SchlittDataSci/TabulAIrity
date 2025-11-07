@@ -18,7 +18,7 @@ def getSeedParams(randomize, model):
         seedText = ''
     else:
         seed = None
-        seedText = f'(random seed = {randInt(0,9999)})'
+        seedText = f'(random seed = {randint(0,9999)})'
     return seed, seedText
 
 
@@ -32,8 +32,6 @@ def getEvaluatorNet(supervisor='gemma3:27b'):
     evaluatorNet = tb.buildChatNet(evaluatorNetDf)
 
     return evaluatorNet
-
-evaluatorNet = getEvaluatorNet()
 
 
 
@@ -153,14 +151,15 @@ def evaluateAnswer(originalPrompt,
                    persona,
                    varsIn,
                    model,
-                   supervisor):
+                   evaluatorNet):
     """Evaluates the y/n correctness of an answer, returning an explanation of the error if found"""
     
     try:
         preppedPrompt = tb.insertChatVars(originalPrompt,varsIn)
         answer = tb.askChatQuestion(preppedPrompt,
                                     persona,
-                                    model)
+                                    model,
+                                    tokens = 2000)
         
         answerVars = {'preppedPrompt':preppedPrompt,
                       'answer':answer}
@@ -187,7 +186,7 @@ def extractIntent(prompt,
     """Summarizes the intent of a prompt"""
     evaluationPersona = "You are an expert evaluator."
     intentPrompt = f"""You are an expert at analyzing instructions and identifying their underlying purpose.  
-You will be given a **Prompt**, and your task is to write **one single sentence** that clearly describes its intent.
+You will be given a **Prompt**, and your task is to write **one or two sentences** that clearly describe its intent.
 
 ---
 
@@ -228,15 +227,18 @@ def iteratePrompt(bestPrompt,
     if supervisor is None:
         supervisor = model
 
+    evaluatorNet = getEvaluatorNet(supervisor)
+
     if intent is None:
         intent = extractIntent(bestPrompt, supervisor)
+        print("Inferred intent:",intent)
 
     testDf = testDfIn.copy(deep=True)
     varsInData = set(testDf.columns)
     varsInPrompt = set(tb.extractChatVars(bestPrompt))
     missingVars = varsInPrompt.difference(varsInData)
     if len(missingVars) != 0:
-        print(f"Warning: some prompt vars were not found in passed data frame.\n\t{missingVars}")
+        print(f"Warning: some expected prompt vars were not found in the passed DataFrame, is this intentional?\n\t{missingVars}")
 
     # Evaluate initial prompt
     bestErrors = []
@@ -246,7 +248,7 @@ def iteratePrompt(bestPrompt,
                                        bestPersona,
                                        row,
                                        model,
-                                       supervisor)
+                                       evaluatorNet)
         bestScores.append(result)
         if error is not None:
             bestErrors.append(error)
@@ -279,7 +281,7 @@ def iteratePrompt(bestPrompt,
                                            newPersona,
                                            row,
                                            model,
-                                           supervisor)
+                                           evaluatorNet)
             newScores.append(result)
             if error is not None:
                 newErrors.append(error)
@@ -292,10 +294,11 @@ def iteratePrompt(bestPrompt,
             bestPrompt = newPrompt
             bestPersona = newPersona
             bestErrors = newErrors
-            history.append({'prompt':bestPrompt,
-                            'persona':bestPersona,
-                            'score':bestScore,
-                            'iteration':0})
+            
+        history.append({'prompt':bestPrompt,
+                        'persona':bestPersona,
+                        'score':bestScore,
+                        'iteration':i})
 
         if bestScore == 1:
             print("All responses flagged as correct, returning finalized prompt and persona.")

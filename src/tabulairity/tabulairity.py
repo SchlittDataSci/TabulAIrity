@@ -506,7 +506,7 @@ def askChatQuestion(prompt,
                     persona,
                     model = modelName,
                     autoformatPersona = None,
-                    tokens = 200,
+                    tokens = 2000,
                     temperature = None,
                     seed = None):
     """Simple method to ask a single chat question"""
