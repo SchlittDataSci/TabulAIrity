@@ -40,6 +40,7 @@ if not os.path.exists(cachePath):
 
 modelName = "gemma3:12b"
 maxTranslateTokens = 8000
+promptDelay = 0.0
 targetLanguage = 'en'
 translationModel = "gemma3:12b"
 
@@ -237,6 +238,8 @@ def insertChatVars(text,varStore):
 def extractChatVars(text): 
     """Returns the set of chatvars from a prompt"""
     matches = set(re.findall(r"\[([^\[\]]*(?:\[[^\[\]]*\][^\[\]]*)*)\]", text))
+    matches = [match for match in matches if "\n" not in match and "," not in match]
+    matches = [match for match in matches if match != '']
     return matches
 
 
@@ -357,7 +360,7 @@ def queryToCache(query,
             result = json.load(cacheIn)['response']
         
     else:
-        sleep(delay)
+        sleep(promptDelay)
         gotResults = False
         attempts = 0
         while not gotResults and attempts < maxAttempts:
@@ -534,7 +537,7 @@ def getYN(text):
                 {'role':'user',
                  'content':f'Please return a value for the following text, coding the ouput as "yes" for any affirmative response, "no" for any negative response: {text}'}]
 
-    query = f"getChatContent({messages},3,'{modelName}')"
+    query = f"getChatContent({messages},3,'gemma3:12b')"
     result = queryToCache(query)
     result = result.lower().replace('"','')
     return result

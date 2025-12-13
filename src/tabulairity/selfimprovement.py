@@ -1,10 +1,13 @@
 import re
 import pandas as pd
 from random import randint
+from datetime import datetime
 
 import tabulairity as tb
 import gsheetconnector as gs
 
+
+verbosity = 1
 
 
 def getSeedParams(randomize, model):
@@ -43,6 +46,7 @@ def rewritePrompt(prompt,
                   errorSummary = None,
                   randomize = True):
     """"Takes a given prompt and persona and returns an LLM improved version of each"""
+    maxTries = 20
     
     if intentPrompt is None:
         intentPrompt = ''
@@ -55,10 +59,12 @@ def rewritePrompt(prompt,
 
     seed, seedText = getSeedParams(randomize,model)
     keptAllVars = False
+    preservedIntent = False
     originalVars = tb.extractChatVars(prompt)
     tries = 0
     
-    while not keptAllVars and tries != 5:
+    while not (keptAllVars and preservedIntent) and tries != maxTries:
+        seed, seedText = getSeedParams(randomize,model)
         questionPrompt = f"""Rewrite the following prompt text to maximize its performance according to the criteria below.{intentPrompt}{errorSummary}
 
 Objectives:
@@ -67,6 +73,7 @@ Objectives:
 * Ensure the rewritten prompt strictly forbids inclusion of any markdown, explanations, commentary, variable placeholders, or descriptive text.
 * Explicitly state in the rewritten prompt what must be included and what must not be included in the model’s output.
 * Preserve and correctly utilize all flag values indicated in square brackets [like_this].
+* Preserve and implement the full intent of the prompt.
 * Do not invent or modify any flag values.
 * Do not add or include meta-instructions, comments, or contextual discussion in the final rewritten text.
 
@@ -88,10 +95,15 @@ Prompt to improve:
                                       seed = seed)
         aiVars = tb.extractChatVars(prompt)
         keptAllVars = aiVars == originalVars
+        preservedIntent = validatePromptIntent(aiPrompt,
+                                               intentPrompt.strip(),
+                                               model)
         tries += 1
 
-    if tries == 5 and not keptVallVars:
-        raise ValueError("Rewritten prompts failed to retain chatvars after 5 attempts.")
+    if tries == maxTries and not keptAllVars:
+        raise ValueError(f"Rewritten prompts failed to retain chatvars after {maxTries} attempts.")
+    elif tries == maxTries and not preservedIntent:
+        raise ValueError(f"Rewritten prompts failed to preserve intent after {maxTries} attempts.")
 
     if not rewritePersona:
         return aiPrompt, persona
@@ -155,18 +167,21 @@ def evaluateAnswer(originalPrompt,
     """Evaluates the y/n correctness of an answer, returning an explanation of the error if found"""
     
     try:
+        tStart = datetime.now()
         preppedPrompt = tb.insertChatVars(originalPrompt,varsIn)
         answer = tb.askChatQuestion(preppedPrompt,
                                     persona,
                                     model,
-                                    tokens = 2000)
+                                    tokens = 4000)
+        tFinish = datetime.now()
+        duration = (tFinish - tStart).total_seconds()
         
         answerVars = {'preppedPrompt':preppedPrompt,
                       'answer':answer}
         varsOut = dict(varsIn) | answerVars
         evaluation = tb.walkChatNet(evaluatorNet,
                                     varStore = varsOut,
-                                    verbosity = 1)
+                                    verbosity = verbosity)
         if tb.ynToBool(evaluation['Start']):
             answeredCorrectly = True
             explanation = None
@@ -178,7 +193,7 @@ def evaluateAnswer(originalPrompt,
         answeredCorrectly = False
         explanation = None
         
-    return answeredCorrectly, explanation
+    return answeredCorrectly, explanation, duration
 
 
 def extractIntent(prompt,
@@ -186,17 +201,18 @@ def extractIntent(prompt,
     """Summarizes the intent of a prompt"""
     evaluationPersona = "You are an expert evaluator."
     intentPrompt = f"""You are an expert at analyzing instructions and identifying their underlying purpose.  
-You will be given a **Prompt**, and your task is to write **one or two sentences** that clearly describe its intent.
+You will be given a **Prompt**, and your task is to write **two or three sentences** that clearly describe its intent, define the underlying context for its use, and the domain-specific considerations needed to adhere to each.
 
 ---
 
 ## Instructions
 
 1. Read the provided **Prompt** carefully.  
-2. Determine what the user is ultimately asking the model to do.  
-3. Write exactly **one sentence** beginning with:  
+2. Determine what the user is ultimately asking the model to do and what needs must be met for its given context.  
+3. Write the first sentence beginning with:  
 "The intent of this prompt is to ..."
-4. Do **not** include any other commentary, formatting, or analysis — only that one sentence.
+4. Do **not** include any other commentary, formatting, or analysis — only a description of the intent of the prompt.
+5. Think deeply on this one to understand the purpose of the prompt, do not simply return data formatting requirements.
 
 ---
 
@@ -212,10 +228,52 @@ You will be given a **Prompt**, and your task is to write **one or two sentences
                                 model,
                                 autoformatPersona = False)
     return intent
-                           
-                                
 
-    
+
+                                
+def validatePromptIntent(prompt,
+                         intent,
+                         model = 'gemma3:27b'):
+    evaluatorPrompt = """You are an intent–prompt alignment classifier. You will receive:
+
+1. **Intent statement** – a description of the user's desired goal, constraints, boundaries, or outcomes.
+2. **Prompt statement** – the actual prompt the user intends to provide to an AI system.
+
+Your task is to determine whether the prompt statement **faithfully follows, reflects, and remains consistent with the full intent expressed**. This includes both explicit instructions and implicit meaning.
+
+### Interpretation rules
+- Consider the **entire** intent, not just surface keywords.
+- Identify the user’s **goal**, **tone**, **scope**, **format requirements**, and any **limitations or exclusions** expressed in the intent.
+- Determine whether the prompt:
+  - Accurately attempts to achieve the described goal.
+  - Remains within the boundaries and constraints of the intent.
+  - Maintains the correct domain, topic, or purpose.
+  - Does not introduce major deviations, contradictions, or irrelevant objectives.
+  - Does not omit any *critical* requirement from the intent.
+- Minor differences in wording or style are acceptable **as long as** the core intent is preserved.
+
+### Output rules
+- Respond **only** with `"yes"` if the prompt broadly aligns with the user’s intent as a whole.
+- Respond **only** with `"no"` if the prompt does not align, includes contradictions, or misses essential parts of the intent.
+- Provide **no explanations, no reasoning, and no additional text** of any kind.
+
+**Inputs:**  
+Intent: [intent]  
+Prompt: [prompt]
+
+**Output:**  
+"yes" or "no"\n"""
+    evaluatorPrompt = tb.insertChatVars(evaluatorPrompt,{'intent':intent,
+                                                         'prompt':prompt})
+    intentCheck = tb.askChatQuestion(evaluatorPrompt,
+                                     'You are a classifier.',
+                                     model = model)
+
+    result = {'yes':True,'no':False}[tb.getYN(intentCheck)]
+    return result
+
+
+
 def iteratePrompt(bestPrompt,
                   bestPersona,
                   testDfIn,
@@ -237,67 +295,84 @@ def iteratePrompt(bestPrompt,
     varsInData = set(testDf.columns)
     varsInPrompt = set(tb.extractChatVars(bestPrompt))
     missingVars = varsInPrompt.difference(varsInData)
+    #print("DEBOOO1",varsInPrompt)
+    #print("DEBOOO2",varsInData)
     if len(missingVars) != 0:
         print(f"Warning: some expected prompt vars were not found in the passed DataFrame, is this intentional?\n\t{missingVars}")
 
     # Evaluate initial prompt
     bestErrors = []
     bestScores = []
+    bestTimes = []
     for _, row in testDf.iterrows():
-        result, error = evaluateAnswer(bestPrompt,
-                                       bestPersona,
-                                       row,
-                                       model,
-                                       evaluatorNet)
+        result, error, duration = evaluateAnswer(bestPrompt,
+                                                 bestPersona,
+                                                 row,
+                                                 model,
+                                                 evaluatorNet)
         bestScores.append(result)
+        bestTimes.append(duration)
         if error is not None:
             bestErrors.append(error)
 
     bestScore = float(sum(bestScores) / len(bestScores))
+    bestTime = float(sum(bestTimes) / len(bestTimes))
     initialScore = bestScore
     history = [{'prompt':bestPrompt,
+                'intent':intent,
                 'persona':bestPersona,
                 'score':bestScore,
+                'time':bestTime,
                 'iteration':0}]
 
     if bestScore == 1:
         print("All responses flagged as correct, returning finalized prompt and persona.")
-        return bestPrompt, bestPersona
+        return pd.DataFrame(history)
 
-    errorReport = '\n'.join([f'* {e}' for e in set(bestErrors)])
+    if bestErrors == []:
+        errorReport = "No errors were logged."
+    else:
+        errorReport = '\n'.join([f'* {e}' for e in set(bestErrors)])
 
     # Begin iterative improvements
     for i in range(depth):
-        print(f'\nIteration: {i}\nbest prompt: {bestPrompt}\n')
+        print(f'\nModel: {model}\nIteration: {i}\nbest prompt: {bestPrompt}\n')
         newPrompt, newPersona = rewritePrompt(bestPrompt,
                                               bestPersona,
                                               supervisor,
-                                              errorSummary=errorReport)
+                                              intentPrompt = intent,
+                                              errorSummary = errorReport)
 
         newErrors = []
         newScores = []
+        newTimes = []
         for _, row in testDf.iterrows():
-            result, error = evaluateAnswer(newPrompt,
-                                           newPersona,
-                                           row,
-                                           model,
-                                           evaluatorNet)
+            result, error, duration = evaluateAnswer(newPrompt,
+                                                     newPersona,
+                                                     row,
+                                                     model,
+                                                     evaluatorNet)
             newScores.append(result)
+            newTimes.append(duration)
             if error is not None:
                 newErrors.append(error)
 
         newScore = float(sum(newScores) / len(newScores))
-        print(f"Best score: {bestScore}    New score: {newScore}")
+        newTime = float(sum(newTimes) / len(newTimes))
+        print(f"Model: {model}     Best score: {bestScore}    New score: {newScore}")
 
         if newScore > bestScore:
             bestScore = newScore
             bestPrompt = newPrompt
             bestPersona = newPersona
             bestErrors = newErrors
+            bestTime = newTime
             
         history.append({'prompt':bestPrompt,
+                        'intent':intent,
                         'persona':bestPersona,
                         'score':bestScore,
+                        'time':bestTime,
                         'iteration':i})
 
         if bestScore == 1:
