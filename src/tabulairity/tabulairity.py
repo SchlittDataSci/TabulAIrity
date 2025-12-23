@@ -42,7 +42,7 @@ modelName = "gemma3:12b"
 maxTranslateTokens = 8000
 promptDelay = 0.0
 targetLanguage = 'en'
-translationModel = "gemma3:12b"
+translationModel = "gemma3:27b"
 
 
 def prepEnvironment():
@@ -443,16 +443,27 @@ def translateOne(text):
     return translation
 
 
+def getLanguage(text):
+    """Checks language of text"""
+    if text in {'',None,np.nan}:
+        language = "unidentified"
+    else:
+        try:
+            language = detect(text)
+        except:
+            language = "unidentified"
+    return language
+
+
 def autoTranslate(dfIn,
                   column,
                   targetLanguage = 'en',
                   model = modelName):
     """Automatically translates all values in one column that are not in the target language"""
-    
     df = dfIn.copy(deep=True)
     langOut = f'{column}_language'
     textOut = f'{column}_translated'
-    df.loc[:,langOut] = df[column].apply(detect)
+    df.loc[:,langOut] = df[column].apply(getLanguage)
     df.loc[:,textOut] = df[column]
     df.loc[df[langOut] != targetLanguage,textOut] = df.loc[df[langOut] != targetLanguage,textOut].apply(translateOne)
 
