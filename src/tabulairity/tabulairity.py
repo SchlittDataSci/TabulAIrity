@@ -21,8 +21,7 @@ import osmnx
 import pickle
 import hashlib
 import pycountry
-
-
+import sqlite3
 
 #########################################
 #                                       #
@@ -30,13 +29,55 @@ import pycountry
 #                                       #
 #########################################
 
-
-
-cachePath = 'TabulAIrityCache'
+cacheDatabase = 'TabulAIrityCache.db' # Changed from folder path to db file
 config = dict()
 
-if not os.path.exists(cachePath):
-    os.mkdir(cachePath)
+
+
+def purgeOldCache(days=14):
+    """Deletes cache entries older than the specified number of days"""
+    try:
+        conn = sqlite3.connect(cacheDatabase)
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT COUNT(*) FROM cache WHERE timestamp < datetime('now', '-' || ? || ' days')", (days,))
+        old_count = cursor.fetchone()[0]
+        
+        if old_count > 0:
+            cursor.execute("DELETE FROM cache WHERE timestamp < datetime('now', '-' || ? || ' days')", (days,))
+            conn.commit()
+            print(f"Purged {old_count} stale cache records older than {days} days.")
+            
+            # Optional: Recover disk space if a large amount of data was deleted
+            # Only run this if old_count is significant to avoid unnecessary SSD wear
+            if old_count > 1000:
+                conn.execute("VACUUM")
+                
+        conn.close()
+    except Exception as e:
+        print(f"Cleanup failed: {e}")
+
+
+        
+def initDb():
+    conn = sqlite3.connect(cacheDatabase)
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA journal_mode = WAL")
+    cursor.execute("PRAGMA synchronous = NORMAL")
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS cache (
+            hash TEXT PRIMARY KEY,
+            query TEXT,
+            response TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    conn.commit()
+    conn.close()
+    
+    purgeOldCache(days=14)
+    
+initDb()
 
 modelName = "gemma3:12b"
 maxTranslateTokens = 8000
@@ -351,15 +392,19 @@ def queryToCache(query,
                  tolerant = False,
                  delay=.05):
     """Attempts to eval a given str query, pulling from cache if found or caching if new and successful"""
-    fileRef = f'{cachePath}/{getHash(query)}.json'
+    queryHash = getHash(query)
     
+    # 1:1 Replacement of file reading with SQLite fetching
+    conn = sqlite3.connect(cacheDatabase)
+    cursor = conn.cursor()
+    cursor.execute("SELECT response FROM cache WHERE hash = ?", (queryHash,))
+    row = cursor.fetchone()
     
-        
-    if os.path.exists(fileRef):
-        with open(fileRef,'r') as cacheIn:    
-            result = json.load(cacheIn)['response']
-        
+    if row:
+        result = json.loads(row[0]) # Assuming response was stored as JSON string
+        conn.close()
     else:
+        conn.close() # Close to avoid locking while waiting for LLM
         sleep(promptDelay)
         gotResults = False
         attempts = 0
@@ -374,14 +419,17 @@ def queryToCache(query,
             else:
                 result = eval(query)
                 attempts = maxAttempts
-                
-        jsonOut = {'query':query,
-                   'response':result}
-             
-        with open(fileRef,'w') as cacheOut:
-            json.dump(jsonOut,cacheOut)
-        #queryKey = bytes(query,'utf-8')
-        #db[queryKey] = json.dumps(result)
+        
+        # 1:1 Replacement of file writing with SQLite insertion
+        conn = sqlite3.connect(cacheDatabase)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR REPLACE INTO cache (hash, query, response) VALUES (?, ?, ?)",
+            (queryHash, str(query), json.dumps(result))
+        )
+        conn.commit()
+        conn.close()
+
     return result
 
 
