@@ -22,14 +22,16 @@ import pickle
 import hashlib
 import pycountry
 import sqlite3
+import asyncio
 
 #########################################
-#                                       #
-#     ENVIRONMENT PREP.                 #
-#                                       #
+#                                       #
+#     ENVIRONMENT PREP.                 #
+#                                       #
 #########################################
 
-cacheDatabase = 'TabulAIrityCache.db' # Changed from folder path to db file
+cacheDatabase = 'TabulAIrityCache.db' 
+useCache = True 
 config = dict()
 
 
@@ -48,8 +50,6 @@ def purgeOldCache(days=14):
             conn.commit()
             print(f"Purged {old_count} stale cache records older than {days} days.")
             
-            # Optional: Recover disk space if a large amount of data was deleted
-            # Only run this if old_count is significant to avoid unnecessary SSD wear
             if old_count > 1000:
                 conn.execute("VACUUM")
                 
@@ -86,7 +86,7 @@ targetLanguage = 'en'
 translationModel = "gemma3:27b"
 
 
-def prepEnvironment():
+def prepEnvironment(routesRef = 'config/model_routes.csv'):
     """Loads Open AI api key from local file"""
     credentialsRef = 'config/environment_args.txt'
     if os.path.exists(credentialsRef):
@@ -97,7 +97,7 @@ def prepEnvironment():
                 [arg,value] = [i.strip() for i in line.split(' = ')][:2]
                 os.environ[arg] = value
     else:
-        print("Environment args not found. If this is intentional, you must manually add LLM credentials to your system environment in order to use TabulAIrity. Otherwise, TabulAIrity will assume a local ollama installation. Please refer to: https://docs.litellm.ai/docs/.")
+        print("Environment args not found. Using defaults.")
 
     configRef = 'config/config.txt'
     if os.path.exists(configRef):
@@ -108,7 +108,6 @@ def prepEnvironment():
                 [arg,value] = [i.strip() for i in line.split(' = ')][:2]
                 config[arg] = value
 
-    routesRef = 'config/model_routes.csv'
     if os.path.exists(routesRef):
         routes = pd.read_csv(routesRef)
         routes = routes.replace({np.nan: None, 'remote': None})
@@ -168,9 +167,9 @@ def getModelRoute(name):
     
 
 #########################################
-#                                       #
-#     TEXT INTEROGATION FUNCTIONS       #
-#                                       #
+#                                       #
+#     TEXT INTEROGATION FUNCTIONS       #
+#                                       #
 #########################################
 
 
@@ -217,12 +216,12 @@ def buildChatNet(script,show=False):
     G = nx.MultiDiGraph()
 
     nodesParsed = [(row['key'],
-                  {'prompt':row['prompt'],
-                   'fx':row['fx'],
-                   'persona':row['persona'],
-                   'tokens':row['tokens'],
-                   'self_eval':row['self_eval'],
-                   'model':row['model']}) for index,row in chatNodes.T.items()]
+                   {'prompt':row['prompt'],
+                    'fx':row['fx'],
+                    'persona':row['persona'],
+                    'tokens':row['tokens'],
+                    'self_eval':row['self_eval'],
+                    'model':row['model']}) for index,row in chatNodes.T.items()]
 
     G.add_nodes_from(nodesParsed)
 
@@ -290,89 +289,177 @@ baseFx = {'isYes':lambda x,y: ynToBool(x),
           'null':lambda x,y: True,
           'pass':lambda x,y: x}
 
+
+def processNodeStep(currentNode, G, chatVars, fxStore, verbosity):
+    """Evaluates a single node and returns downstream edges"""
+    nodeVars = G.nodes[currentNode]
+    prompt = insertChatVars(nodeVars['prompt'], chatVars)
+    
+    if verbosity == 2:
+        print()
+        print(prompt)
+
+    tokens = nodeVars['tokens']
+    persona = nodeVars['persona']
+    rowModel = nodeVars['model']
+    
+    failed = False
+    chatResponse = ""
+
+    if validRun(persona, prompt):
+        if not str(prompt).startswith('recall:'):
+            chatResponse = askChatQuestion(prompt,
+                                          persona,
+                                          model=rowModel,
+                                          tokens=tokens)
+        else:
+            chatResponse = prompt[7:].strip()
+            if verbosity > 0:
+                print(chatResponse)
+            
+        chatVars[currentNode + '_prompt'] = prompt
+        chatVars[currentNode + '_raw'] = chatResponse
+        selfEval = nodeVars['self_eval']
+
+        if selfEval:
+            worthUsing = isUseful(prompt, chatResponse)
+        else:
+            worthUsing = True
+
+        if worthUsing:
+            try:
+                cleanedResponse = fxStore[nodeVars['fx']](chatResponse, chatVars)
+            except:
+                cleanedResponse = chatResponse
+            chatVars[currentNode] = cleanedResponse
+            if verbosity > 0:
+                print(f'\t-{persona}: {chatResponse} ({cleanedResponse})')
+        else:
+            if verbosity > 0:
+                print(f'\t*FAILS: {chatResponse}')
+            failed = True
+
+    nextNodes = []
+    if not failed:
+        edgesFromQ = G.out_edges([currentNode], data=True)
+        for start, end, edgeData in edgesFromQ:
+            try:
+                edgeResult = fxStore[edgeData['fx']](chatResponse, chatVars)
+                chatVars[f'{start}-{end}'] = edgeResult
+                
+                if str(edgeResult).lower() == 'true':
+                    nextNodes.append(end)
+                    edgePrompt = insertChatVars(edgeData['prompt'], chatVars)
+                    showIfValid(edgePrompt)
+                elif str(edgeResult).lower() == 'false':
+                    pass
+            except Exception as e:
+                print(f"Edge evaluation failed on {start}->{end}: {e}")
+
+    nextNodes.sort(reverse=True)
+    return nextNodes
+
+
+
+async def worker(queue, G, chatVars, fxStore, verbosity, semaphore):
+    """Async worker that processes nodes from queue with semaphore limits"""
+    while True:
+        currentNode = await queue.get()
+        try:
+            async with semaphore:
+                # Run blocking logic in thread to avoid freezing loop
+                nextNodes = await asyncio.to_thread(processNodeStep, 
+                                                    currentNode, 
+                                                    G, 
+                                                    chatVars, 
+                                                    fxStore, 
+                                                    verbosity)
+            
+            for node in sorted(nextNodes):
+                queue.put_nowait(node)
+                
+        except Exception as e:
+            print(f"Error processing node {currentNode}: {e}")
+        finally:
+            queue.task_done()
+
+
+
+async def walkChatNetAsync(G, fxStore, varStore, verbosity, numWorkers=4):
+    """Orchestrates async graph traversal"""
+    queue = asyncio.Queue()
+    queue.put_nowait('Start')
+    
+    chatVars = deepcopy(varStore)
+    fxStore = fxStore | baseFx
+    semaphore = asyncio.Semaphore(numWorkers)
+    
+    workers = []
+    for i in range(numWorkers):
+        workerTask = asyncio.create_task(worker(queue, G, chatVars, fxStore, verbosity, semaphore))
+        workers.append(workerTask)
+    
+    await queue.join()
+    
+    for w in workers:
+        w.cancel()
+        
+    await asyncio.gather(*workers, return_exceptions=True)
+    
+    return chatVars
+
+
     
 def walkChatNet(G,
                 fxStore=dict(),
                 varStore=dict(),
-                verbosity=1):
+                verbosity=1,
+                runAsync=False,
+                numWorkers=4):
     """Walks the chat network, interrogating data through all available paths"""
-    toAsk = ['Start']
-    fxStore = fxStore | baseFx
-    chatVars = deepcopy(varStore)
-    while toAsk != []:
-        nextQ = toAsk.pop()
-        nodeVars = G.nodes[nextQ]
-        prompt = insertChatVars(nodeVars['prompt'],chatVars)
-        if verbosity == 2:
-            print()
-            print(prompt)
+    global useCache
+    
+    if runAsync:
+        print(f"Starting Async Walk with {numWorkers} workers...")
+        try:
+            # Check for existing event loop (Jupyter fix)
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
 
-        tokens = nodeVars['tokens']
-        persona = nodeVars['persona']
-        rowModel = nodeVars['model']
+            if loop and loop.is_running():
+                import nest_asyncio
+                nest_asyncio.apply()
+            
+            return asyncio.run(walkChatNetAsync(G, fxStore, varStore, verbosity, numWorkers))
+            
+        except ImportError:
+            print("Error: To run async in Jupyter, please install 'nest_asyncio'.")
+            return varStore
+        except KeyboardInterrupt:
+            print("\nAsync execution interrupted by user.")
+            return varStore
+    else:
+        toAsk = ['Start']
+        fxStore = fxStore | baseFx
+        chatVars = deepcopy(varStore)
         
-        failed = False
-
-        if validRun(persona,prompt):
-            if not str(prompt).startswith('recall:'):
-                chatResponse = askChatQuestion(prompt,
-                                               persona,
-                                               model=rowModel,
-                                               tokens=tokens)
-            else:
-                chatResponse = prompt[7:].strip()
-                if verbosity > 0:
-                    print(chatResponse)
-                
-            chatVars[nextQ+'_prompt'] = prompt
-            chatVars[nextQ+'_raw'] = chatResponse
-            selfEval = nodeVars['self_eval']
-
-            if selfEval:
-                worthUsing = isUseful(prompt,chatResponse)
-            else:
-                worthUsing = True
-
-
-            if worthUsing:
-                try:
-                    cleanedResponse = fxStore[nodeVars['fx']](chatResponse,chatVars)
-                except:
-                    cleanedResponse = chatResponse
-                chatVars[nextQ] = cleanedResponse
-                if verbosity > 0:
-                    print(f'\t-{persona}: {chatResponse} ({cleanedResponse})')
-            else:
-                if verbosity > 0:
-                    print(f'\t*FAILS: {chatResponse}')
-                failed = True
-
-        if not failed:
-            edgesFromQ = G.out_edges([nextQ],data=True)
-            nextNodes = []
-
-            for start,end,edgeData in edgesFromQ:
-                edgeResult = fxStore[edgeData['fx']](chatResponse,chatVars)
-                chatVars[f'{start}-{end}'] = edgeResult
-                if edgeResult in {True,'true','True'}:
-                    nextNodes.append(end)
-                    prompt = insertChatVars(edgeData['prompt'],chatVars)
-                    showIfValid(prompt)
-                elif edgeResult in {False,'false','False'}:
-                    pass
-            nextNodes.sort(reverse=True)
+        while toAsk != []:
+            nextQ = toAsk.pop()
+            nextNodes = processNodeStep(nextQ, G, chatVars, fxStore, verbosity)
             toAsk += nextNodes
-
-    return chatVars
+            
+        return chatVars
 
 
 
 
 
 #########################################
-#                                       #
-#     QUERY CACHING FUNCTIONS           #
-#                                       #
+#                                       #
+#     QUERY CACHING FUNCTIONS           #
+#                                       #
 #########################################
 
 
@@ -388,47 +475,58 @@ def getHash(query):
 
 
 def queryToCache(query,
-                 maxAttempts = 3,
-                 tolerant = False,
+                 maxAttempts = 2,
+                 tolerant = True,
                  delay=.05):
     """Attempts to eval a given str query, pulling from cache if found or caching if new and successful"""
+    global useCache
+    
     queryHash = getHash(query)
     
-    # 1:1 Replacement of file reading with SQLite fetching
-    conn = sqlite3.connect(cacheDatabase)
-    cursor = conn.cursor()
-    cursor.execute("SELECT response FROM cache WHERE hash = ?", (queryHash,))
-    row = cursor.fetchone()
-    
-    if row:
-        result = json.loads(row[0]) # Assuming response was stored as JSON string
-        conn.close()
-    else:
-        conn.close() # Close to avoid locking while waiting for LLM
-        sleep(promptDelay)
-        gotResults = False
-        attempts = 0
-        while not gotResults and attempts < maxAttempts:
-            if tolerant:
-                try:
-                    result = eval(query)
-                    gotResults = True
-                except:
-                    attempts += 1
-                    sleep(5)
-            else:
-                result = eval(query)
-                attempts = maxAttempts
-        
-        # 1:1 Replacement of file writing with SQLite insertion
+    if useCache:
         conn = sqlite3.connect(cacheDatabase)
         cursor = conn.cursor()
-        cursor.execute(
-            "INSERT OR REPLACE INTO cache (hash, query, response) VALUES (?, ?, ?)",
-            (queryHash, str(query), json.dumps(result))
-        )
-        conn.commit()
+        cursor.execute("SELECT response FROM cache WHERE hash = ?", (queryHash,))
+        row = cursor.fetchone()
         conn.close()
+        
+        if row:
+            try:
+                result = json.loads(row[0])
+                return result
+            except json.JSONDecodeError:
+                pass 
+
+    sleep(promptDelay)
+    gotResults = False
+    attempts = 0
+    result = None
+    
+    while not gotResults and attempts < maxAttempts:
+        if tolerant:
+            try:
+                result = eval(query)
+                gotResults = True
+            except:
+                attempts += 1
+                sleep(5)
+        else:
+            result = eval(query)
+            gotResults = True
+            attempts = maxAttempts
+    
+    if gotResults:
+        try:
+            conn = sqlite3.connect(cacheDatabase)
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT OR REPLACE INTO cache (hash, query, response) VALUES (?, ?, ?)",
+                (queryHash, str(query), json.dumps(result))
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"Cache write failed: {e}")
 
     return result
 
@@ -465,9 +563,9 @@ def cacheGeocode(locText):
 
 
 #########################################
-#                                       #
-#     LANGUAGE HANDLING                 #
-#                                       #
+#                                       #
+#     LANGUAGE HANDLING                 #
+#                                       #
 #########################################
 
 
@@ -520,9 +618,9 @@ def autoTranslate(dfIn,
 
 
 #########################################
-#                                       #
-#     CHAT QUERIES                      #
-#                                       #
+#                                       #
+#     CHAT QUERIES                      #
+#                                       #
 #########################################
 
 
@@ -532,12 +630,12 @@ def testRoutes(query = 'How many Rs are there in strawberry?',
                autoformatPersona = True):
     """Quick method to test models from config/model_routes.py"""
     working = []
-    for model in tb.modelRoutes.index.sort_values():
+    for model in modelRoutes.index.sort_values():
         try:
-            response = tb.askChatQuestion(query,
-                                          persona,
-                                          autoformatPersona = autoformatPersona,
-                                          model = model)
+            response = askChatQuestion(query,
+                                       persona,
+                                       autoformatPersona = autoformatPersona,
+                                       model = model)
             print(f'{model} ~ {response}\n')
             working.append(model)
         except:
@@ -598,7 +696,10 @@ def getYN(text):
 
     query = f"getChatContent({messages},3,'gemma3:12b')"
     result = queryToCache(query)
-    result = result.lower().replace('"','')
+    if result:
+        result = result.lower().replace('"','')
+    else:
+        result = "no" 
     return result
 
 
@@ -607,8 +708,9 @@ def ynToBool(evaluation):
     """Input cleaner to convert yes or no answers to boolean"""
     textAnswer = getYN(evaluation)
     textAnswer = ''.join(i for i in textAnswer if i.isalnum())
+    if not textAnswer: return False
     result = {'y':True,
-              'n':False}[textAnswer[0].lower()]
+              'n':False}.get(textAnswer[0].lower(), False)
     return result
 
 
