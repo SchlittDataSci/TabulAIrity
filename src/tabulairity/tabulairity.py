@@ -23,61 +23,333 @@ import hashlib
 import pycountry
 import sqlite3
 import asyncio
+import traceback
+import sys
 
 #########################################
-#                                       #
-#     ENVIRONMENT PREP.                 #
-#                                       #
+#                                       #
+#      POSTGRESQL CACHE BACKEND         #
+#                                       #
 #########################################
 
-cacheDatabase = 'TabulAIrityCache.db' 
-useCache = True 
+try:
+    import psycopg2
+    from psycopg2 import pool
+    POSTGRES_AVAILABLE = True
+except ImportError:
+    POSTGRES_AVAILABLE = False
+    print("[Warning] psycopg2 not found. Install with: pip install psycopg2-binary")
+    print("[Warning] Falling back to SQLite cache (not multi-instance safe)")
+
+# Cache configuration
+cacheConfig = {
+    'backend': 'postgres',  # 'postgres' or 'sqlite'
+    'host': 'localhost',
+    'port': 5433,
+    'database': 'tabulairity_cache',
+    'user': None,  # Will use OS user if None
+    'password': None,
+    'minConnections': 2,
+    'maxConnections': 20
+}
+
+# Global connection pool
+_connectionPool = None
+useCache = True
 config = dict()
 
+#########################################
+#                                       #
+#      CACHE BACKEND FUNCTIONS          #
+#                                       #
+#########################################
+
+def initCachePool(cacheConfigOverride=None):
+    """Initialize PostgreSQL connection pool"""
+    global _connectionPool, cacheConfig
+    
+    if not POSTGRES_AVAILABLE:
+        print("[Cache] PostgreSQL not available, using SQLite fallback")
+        cacheConfig['backend'] = 'sqlite'
+        return initDbSQLite()
+    
+    if cacheConfigOverride:
+        cacheConfig.update(cacheConfigOverride)
+    
+    # Auto-detect backend
+    if cacheConfig['backend'] == 'postgres':
+        # Use OS user if not specified
+        if cacheConfig['user'] is None:
+            cacheConfig['user'] = os.environ.get('USER', 'postgres')
+        
+        try:
+            _connectionPool = psycopg2.pool.ThreadedConnectionPool(
+                cacheConfig['minConnections'],
+                cacheConfig['maxConnections'],
+                host=cacheConfig['host'],
+                port=cacheConfig['port'],
+                database=cacheConfig['database'],
+                user=cacheConfig['user'],
+                password=cacheConfig['password']
+            )
+            print(f"[Cache] PostgreSQL initialized: {cacheConfig['database']}@{cacheConfig['host']}:{cacheConfig['port']}")
+            return True
+        except Exception as e:
+            print(f"[Cache] PostgreSQL connection failed: {e}")
+            print("[Cache] Falling back to SQLite")
+            cacheConfig['backend'] = 'sqlite'
+            return initDbSQLite()
+    else:
+        return initDbSQLite()
+
+
+def getConnection():
+    """Get connection from pool"""
+    global _connectionPool
+    
+    if cacheConfig['backend'] == 'postgres':
+        if _connectionPool is None:
+            if not initCachePool():
+                raise Exception("Cache pool not initialized")
+        return _connectionPool.getconn()
+    else:
+        # SQLite connection
+        return sqlite3.connect(cacheDatabase, timeout=120)
+
+
+def returnConnection(conn):
+    """Return connection to pool"""
+    global _connectionPool
+    
+    if cacheConfig['backend'] == 'postgres':
+        if _connectionPool:
+            _connectionPool.putconn(conn)
+    else:
+        # SQLite connection
+        if conn:
+            conn.close()
+
+
+def cacheGet(queryHash):
+    """Retrieve cached result by hash"""
+    conn = None
+    try:
+        conn = getConnection()
+        cursor = conn.cursor()
+        
+        if cacheConfig['backend'] == 'postgres':
+            cursor.execute(
+                "SELECT response FROM cache WHERE hash = %s",
+                (queryHash,)
+            )
+        else:
+            cursor.execute(
+                "SELECT response FROM cache WHERE hash = ?",
+                (queryHash,)
+            )
+        
+        row = cursor.fetchone()
+        cursor.close()
+        
+        if row:
+            return json.loads(row[0])
+        return None
+        
+    except Exception as e:
+        return None
+    finally:
+        if conn:
+            returnConnection(conn)
+
+
+def cacheSet(queryHash, query, result):
+    """Store query result in cache"""
+    conn = None
+    try:
+        conn = getConnection()
+        cursor = conn.cursor()
+        
+        if cacheConfig['backend'] == 'postgres':
+            cursor.execute("""
+                INSERT INTO cache (hash, query, response, timestamp)
+                VALUES (%s, %s, %s, NOW())
+                ON CONFLICT (hash) 
+                DO UPDATE SET 
+                    response = EXCLUDED.response,
+                    timestamp = NOW()
+            """, (queryHash, str(query), json.dumps(result)))
+        else:
+            cursor.execute(
+                "INSERT OR REPLACE INTO cache (hash, query, response) VALUES (?, ?, ?)",
+                (queryHash, str(query), json.dumps(result))
+            )
+        
+        conn.commit()
+        cursor.close()
+        return True
+        
+    except Exception as e:
+        if conn:
+            try:
+                conn.rollback()
+            except:
+                pass
+        return False
+    finally:
+        if conn:
+            returnConnection(conn)
 
 
 def purgeOldCache(days=14):
-    """Deletes cache entries older than the specified number of days"""
+    """Delete cache entries older than specified days"""
+    conn = None
     try:
-        conn = sqlite3.connect(cacheDatabase)
+        conn = getConnection()
         cursor = conn.cursor()
         
-        cursor.execute("SELECT COUNT(*) FROM cache WHERE timestamp < datetime('now', '-' || ? || ' days')", (days,))
-        old_count = cursor.fetchone()[0]
+        if cacheConfig['backend'] == 'postgres':
+            cursor.execute("""
+                DELETE FROM cache
+                WHERE timestamp < NOW() - INTERVAL '%s days'
+            """, (days,))
+        else:
+            cursor.execute(
+                "DELETE FROM cache WHERE timestamp < datetime('now', '-' || ? || ' days')",
+                (days,)
+            )
         
-        if old_count > 0:
-            cursor.execute("DELETE FROM cache WHERE timestamp < datetime('now', '-' || ? || ' days')", (days,))
-            conn.commit()
-            print(f"Purged {old_count} stale cache records older than {days} days.")
-            
-            if old_count > 1000:
+        deleted = cursor.rowcount
+        conn.commit()
+        
+        # Vacuum to reclaim space
+        if cacheConfig['backend'] == 'postgres':
+            cursor.execute("VACUUM ANALYZE cache")
+        else:
+            try:
                 conn.execute("VACUUM")
-                
-        conn.close()
-    except Exception as e:
-        print(f"Cleanup failed: {e}")
-
-
+            except:
+                pass
         
-def initDb():
-    conn = sqlite3.connect(cacheDatabase)
-    cursor = conn.cursor()
-    cursor.execute("PRAGMA journal_mode = WAL")
-    cursor.execute("PRAGMA synchronous = NORMAL")
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS cache (
-            hash TEXT PRIMARY KEY,
-            query TEXT,
-            response TEXT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    conn.commit()
-    conn.close()
-    
-    purgeOldCache(days=14)
-    
-initDb()
+        cursor.close()
+        
+        if deleted > 0:
+            print(f"[Cache] Purged {deleted} entries older than {days} days")
+        return deleted
+        
+    except Exception as e:
+        print(f"[Cache] Purge error: {e}")
+        if conn:
+            try:
+                conn.rollback()
+            except:
+                pass
+        return 0
+    finally:
+        if conn:
+            returnConnection(conn)
+
+
+def cacheStats():
+    """Get cache statistics"""
+    conn = None
+    try:
+        conn = getConnection()
+        cursor = conn.cursor()
+        
+        # Total entries
+        cursor.execute("SELECT COUNT(*) FROM cache")
+        total = cursor.fetchone()[0]
+        
+        # Entries from last 24 hours
+        if cacheConfig['backend'] == 'postgres':
+            cursor.execute("""
+                SELECT COUNT(*) FROM cache
+                WHERE timestamp > NOW() - INTERVAL '1 day'
+            """)
+        else:
+            cursor.execute("""
+                SELECT COUNT(*) FROM cache
+                WHERE timestamp > datetime('now', '-1 day')
+            """)
+        recent = cursor.fetchone()[0]
+        
+        # Oldest entry
+        cursor.execute("SELECT MIN(timestamp) FROM cache")
+        oldest = cursor.fetchone()[0]
+        
+        cursor.close()
+        
+        return {
+            'total': total,
+            'last24h': recent,
+            'oldest': oldest,
+            'backend': cacheConfig['backend']
+        }
+        
+    except Exception as e:
+        print(f"[Cache] Stats error: {e}")
+        return None
+    finally:
+        if conn:
+            returnConnection(conn)
+
+
+#########################################
+#                                       #
+#      SQLITE FALLBACK                  #
+#                                       #
+#########################################
+
+cacheDatabase = 'TabulAIrityCache.db'
+
+def initDbSQLite():
+    """Initialize SQLite database as fallback"""
+    try:
+        with sqlite3.connect(cacheDatabase, timeout=120) as conn:
+            cursor = conn.cursor()
+            
+            # WAL mode for concurrent reads
+            cursor.execute("PRAGMA journal_mode = WAL")
+            cursor.execute("PRAGMA synchronous = NORMAL")
+            cursor.execute("PRAGMA temp_store = MEMORY")
+            cursor.execute("PRAGMA mmap_size = 30000000000")
+            
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS cache (
+                    hash TEXT PRIMARY KEY,
+                    query TEXT,
+                    response TEXT,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_cache_hash ON cache(hash)
+            ''')
+            
+            conn.commit()
+        
+        purgeOldCache(days=14)
+        print(f"[Cache] SQLite initialized: {cacheDatabase}")
+        return True
+        
+    except Exception as e:
+        print(f"[Cache] SQLite initialization error: {e}")
+        return False
+
+
+# Initialize cache on import
+if POSTGRES_AVAILABLE and cacheConfig['backend'] == 'postgres':
+    initCachePool()
+else:
+    initDbSQLite()
+
+
+#########################################
+#                                       #
+#      ENVIRONMENT PREP                 #
+#                                       #
+#########################################
 
 modelName = "gemma3:12b"
 maxTranslateTokens = 8000
@@ -86,18 +358,18 @@ targetLanguage = 'en'
 translationModel = "gemma3:27b"
 
 
-def prepEnvironment(routesRef = 'config/model_routes.csv'):
-    """Loads Open AI api key from local file"""
+def prepEnvironment(routesRef='config/model_routes.csv'):
+    """Load environment args and model routes"""
     credentialsRef = 'config/environment_args.txt'
     if os.path.exists(credentialsRef):
         with open(credentialsRef) as credentials:
             lines = credentials.readlines()
         for line in lines:
             if ' = ' in line:
-                [arg,value] = [i.strip() for i in line.split(' = ')][:2]
+                [arg, value] = [i.strip() for i in line.split(' = ')][:2]
                 os.environ[arg] = value
     else:
-        print("Environment args not found. Using defaults.")
+        print("[Config] Environment args not found. Using defaults.")
 
     configRef = 'config/config.txt'
     if os.path.exists(configRef):
@@ -105,7 +377,7 @@ def prepEnvironment(routesRef = 'config/model_routes.csv'):
             lines = configs.readlines()
         for line in lines:
             if ' = ' in line:
-                [arg,value] = [i.strip() for i in line.split(' = ')][:2]
+                [arg, value] = [i.strip() for i in line.split(' = ')][:2]
                 config[arg] = value
 
     if os.path.exists(routesRef):
@@ -113,8 +385,8 @@ def prepEnvironment(routesRef = 'config/model_routes.csv'):
         routes = routes.replace({np.nan: None, 'remote': None})
         routes['last used'] = datetime.utcnow()
     else:
-        routes = {modelName:{'route':modelName,
-                             'ip':'http://localhost:11434'}}
+        routes = {modelName: {'route': modelName,
+                              'ip': 'http://localhost:11434'}}
         routes = pd.DataFrame(routes).T
 
     return routes
@@ -123,10 +395,9 @@ def prepEnvironment(routesRef = 'config/model_routes.csv'):
 modelRoutes = prepEnvironment()
 
 
-
 def getModelRoute(name):
-    """Model route accessor with LRU (least recently used) logic and user reminders"""
-    global modelRoutes  # assume global persistence
+    """Model route accessor with LRU"""
+    global modelRoutes
 
     for col in ['model', 'route', 'ip', 'last used']:
         if col not in modelRoutes.columns:
@@ -135,23 +406,23 @@ def getModelRoute(name):
     matches = modelRoutes.loc[modelRoutes['model'] == name]
 
     if matches.empty:
-        print(f"{name} not found in model routes (config/model_routes.csv), adding manually...")
+        print(f"[Config] {name} not found in routes, adding...")
         if 'ollama/' in name:
             defaultIP = 'http://localhost:11434'
         else:
             defaultIP = None
 
         modelRoutes.loc[len(modelRoutes)] = {'model': name,
-                                             'route': name,
-                                             'ip': defaultIP,
-                                             'last used': datetime.utcnow()}
+                                              'route': name,
+                                              'ip': defaultIP,
+                                              'last used': datetime.utcnow()}
         return name, defaultIP
 
     if len(matches) > 1:
         temp = matches.copy()
         temp['last used'] = pd.to_datetime(temp['last used'], errors='coerce')
         if temp['last used'].notnull().any():
-            chosenIdx = temp['last used'].idxmin()  # this is the actual index in modelRoutes
+            chosenIdx = temp['last used'].idxmin()
         else:
             chosenIdx = temp.index[0]
         routeRow = modelRoutes.loc[chosenIdx]
@@ -164,33 +435,26 @@ def getModelRoute(name):
     return routeRow['route'], routeRow['ip']
 
 
-    
-
 #########################################
-#                                       #
-#     TEXT INTEROGATION FUNCTIONS       #
-#                                       #
+#                                       #
+#      TEXT INTERROGATION FUNCTIONS     #
+#                                       #
 #########################################
 
 
-def validRun(var,prompt):
-    """returns true if the persona is valid or disused"""
+def validRun(var, prompt):
     return isValid(var) or str(prompt).startswith('recall:')
 
 
-
 def isValid(var):
-    """returns true if var is displayable"""
-    return var == var and var not in {None,''}
-
+    return var == var and var not in {None, ''}
 
 
 def showIfValid(var):
-    """prints a var if it is printable"""
     if isValid(var):
         print(var)
 
-        
+
 def mapEdgeColor(fx):
     if fx == 'null':
         return 'black'
@@ -201,126 +465,118 @@ def mapEdgeColor(fx):
     else:
         return 'green'
 
-    
-def buildChatNet(script,show=False):
-    """Builds a chat network from a formatted csv"""
+
+def buildChatNet(script, show=False):
     script['fx'] = script['fx'].fillna('null')
     script['prompt'] = script['prompt'].fillna('')
     script['self_eval'] = script['self_eval'].fillna(False)
-    
+
     if 'model' not in script.columns:
-        script.loc[:,'model'] = modelName
-    
+        script.loc[:, 'model'] = modelName
+
     chatEdges = script[script.type == 'edge']
     chatNodes = script[script.type == 'node']
     G = nx.MultiDiGraph()
 
     nodesParsed = [(row['key'],
-                   {'prompt':row['prompt'],
-                    'fx':row['fx'],
-                    'persona':row['persona'],
-                    'tokens':row['tokens'],
-                    'self_eval':row['self_eval'],
-                    'model':row['model']}) for index,row in chatNodes.T.items()]
+                    {'prompt': row['prompt'],
+                     'fx': row['fx'],
+                     'persona': row['persona'],
+                     'tokens': row['tokens'],
+                     'self_eval': row['self_eval'],
+                     'model': row['model']}) for index, row in chatNodes.T.items()]
 
     G.add_nodes_from(nodesParsed)
 
     splitEdge = lambda x: x['key'].split('-')
-    edgesParsed = {tuple(splitEdge(row)+[row['fx']]):{'prompt':row['prompt'],'fx':row['fx'],} for index,row in chatEdges.T.items()}
+    edgesParsed = {tuple(splitEdge(row) + [row['fx']]): {'prompt': row['prompt'], 'fx': row['fx'], } for index, row in
+                   chatEdges.T.items()}
     G.add_edges_from(edgesParsed)
     nx.set_edge_attributes(G, edgesParsed)
     connected = nx.is_weakly_connected(G)
-    
-    if not connected:
-        print(f"Warning, the chat graph has one or more stray components.")
-    
-    if show:
-        pos = nx.kamada_kawai_layout(G)
-        pos = nx.spring_layout(G,
-                               pos=pos,
-                               iterations=10)
-        colors = [mapEdgeColor(i[2]) for i in G.edges]
 
-        fig,ax = plt.subplots(figsize=(10,10))
-        nx.draw_networkx_edges(G,
-                               pos = pos,
-                               edge_color = colors,
-                               connectionstyle="arc3,rad=0.1",
-                               alpha = .6)
-        
-        nx.draw_networkx_nodes(G,
-                               pos = pos,
-                               alpha = .6)
-        
-        nx.draw_networkx_labels(G,
-                               pos = pos)
-        
-        ax.spines['top'].set_visible(False)
-        ax.spines['right'].set_visible(False)
-        ax.spines['bottom'].set_visible(False)
-        ax.spines['left'].set_visible(False)
-        plt.savefig('lastplot.png')
-        
-                
+    if not connected:
+        print(f"[Warning] Chat graph has disconnected components.")
+
+    if show:
+        pass
+
     return G
 
 
-
-def insertChatVars(text,varStore):
-    """Adds vars from the varstore into a chat prompt"""
-    for key,value in varStore.items():
+def insertChatVars(text, varStore):
+    for key, value in varStore.items():
         toReplace = f'[{key}]'
-        text = text.replace(toReplace,str(value))
+        text = text.replace(toReplace, str(value))
     return text
 
 
-
-def extractChatVars(text): 
-    """Returns the set of chatvars from a prompt"""
+def extractChatVars(text):
     matches = set(re.findall(r"\[([^\[\]]*(?:\[[^\[\]]*\][^\[\]]*)*)\]", text))
     matches = [match for match in matches if "\n" not in match and "," not in match]
     matches = [match for match in matches if match != '']
     return matches
 
 
-baseFx = {'isYes':lambda x,y: ynToBool(x),
-          'isNo':lambda x,y: not ynToBool(x),
-          'getYN':lambda x,y: getYN(x),
-          'null':lambda x,y: True,
-          'pass':lambda x,y: x}
+baseFx = {'isYes': lambda x, y: ynToBool(x),
+          'isNo': lambda x, y: not ynToBool(x),
+          'getYN': lambda x, y: getYN(x),
+          'null': lambda x, y: True,
+          'pass': lambda x, y: x}
 
 
 def processNodeStep(currentNode, G, chatVars, fxStore, verbosity):
-    """Evaluates a single node and returns downstream edges"""
+    """Process a single node - FAIL FAST on errors to prevent garbage data propagation"""
     nodeVars = G.nodes[currentNode]
-    prompt = insertChatVars(nodeVars['prompt'], chatVars)
-    
-    if verbosity == 2:
-        print()
-        print(prompt)
 
-    tokens = nodeVars['tokens']
-    persona = nodeVars['persona']
-    rowModel = nodeVars['model']
-    
+    # --- BLOCK 1: PREPARATION ---
+    try:
+        prompt = insertChatVars(nodeVars['prompt'], chatVars)
+        tokens = nodeVars['tokens']
+        persona = nodeVars['persona']
+        rowModel = nodeVars['model']
+        selfEval = nodeVars['self_eval']
+    except Exception:
+        print(f"\n[ERROR] Node '{currentNode}' preparation failed")
+        traceback.print_exc()
+        return []
+
     failed = False
     chatResponse = ""
 
-    if validRun(persona, prompt):
-        if not str(prompt).startswith('recall:'):
-            chatResponse = askChatQuestion(prompt,
-                                          persona,
-                                          model=rowModel,
-                                          tokens=tokens)
-        else:
-            chatResponse = prompt[7:].strip()
-            if verbosity > 0:
-                print(chatResponse)
-            
-        chatVars[currentNode + '_prompt'] = prompt
-        chatVars[currentNode + '_raw'] = chatResponse
-        selfEval = nodeVars['self_eval']
+    # --- BLOCK 2: EXTERNAL I/O (Fail Fast - No Retries) ---
+    try:
+        if validRun(persona, prompt):
+            if not str(prompt).startswith('recall:'):
+                if verbosity == 2:
+                    print()
+                    print(prompt)
+                elif verbosity > 0:
+                    print(f"   >>> Processing '{currentNode}' (Model: {rowModel})...")
 
+                chatResponse = askChatQuestion(prompt,
+                                                persona,
+                                                model=rowModel,
+                                                tokens=tokens)
+
+                if verbosity > 0:
+                    print(f"   <<< Finished '{currentNode}': {chatResponse[:100]}...")
+
+            else:
+                chatResponse = prompt[7:].strip()
+
+            chatVars[currentNode + '_prompt'] = prompt
+            chatVars[currentNode + '_raw'] = chatResponse
+
+    except Exception as e:
+        # FAIL FAST: Any error stops the graph
+        print(f"\n[FATAL] Node '{currentNode}' failed - stopping graph to prevent garbage data")
+        print(f"Error: {str(e)[:200]}")
+        traceback.print_exc()
+        raise  # Re-raise to stop entire graph
+
+    # --- BLOCK 3: POST-PROCESSING ---
+    try:
         if selfEval:
             worthUsing = isUseful(prompt, chatResponse)
         else:
@@ -329,143 +585,235 @@ def processNodeStep(currentNode, G, chatVars, fxStore, verbosity):
         if worthUsing:
             try:
                 cleanedResponse = fxStore[nodeVars['fx']](chatResponse, chatVars)
-            except:
+            except Exception as fxErr:
+                print(f"[Warning] Cleaning function {nodeVars['fx']} failed: {fxErr}")
                 cleanedResponse = chatResponse
+
             chatVars[currentNode] = cleanedResponse
             if verbosity > 0:
-                print(f'\t-{persona}: {chatResponse} ({cleanedResponse})')
+                print(f'\t-{persona}: {cleanedResponse}')
         else:
             if verbosity > 0:
-                print(f'\t*FAILS: {chatResponse}')
+                print(f'\t*FAILS: {chatResponse[:50]}...')
             failed = True
 
-    nextNodes = []
-    if not failed:
-        edgesFromQ = G.out_edges([currentNode], data=True)
-        for start, end, edgeData in edgesFromQ:
-            try:
+        nextNodes = []
+        if not failed:
+            edgesFromQ = G.out_edges([currentNode], data=True)
+            for start, end, edgeData in edgesFromQ:
                 edgeResult = fxStore[edgeData['fx']](chatResponse, chatVars)
                 chatVars[f'{start}-{end}'] = edgeResult
-                
+
                 if str(edgeResult).lower() == 'true':
                     nextNodes.append(end)
                     edgePrompt = insertChatVars(edgeData['prompt'], chatVars)
                     showIfValid(edgePrompt)
-                elif str(edgeResult).lower() == 'false':
-                    pass
-            except Exception as e:
-                print(f"Edge evaluation failed on {start}->{end}: {e}")
 
-    nextNodes.sort(reverse=True)
-    return nextNodes
+        nextNodes.sort(reverse=True)
+        return nextNodes
+
+    except Exception:
+        print(f"\n[FATAL] Node '{currentNode}' edge evaluation failed")
+        traceback.print_exc()
+        raise  # Re-raise to stop entire graph
 
 
+async def monitor(queue, workers):
+    """Heartbeat monitor with deadlock detection"""
+    lastProgress = datetime.utcnow()
+    lastUnfinished = 0
+    stuckCount = 0
+    lastQueueSnapshot = None  # NEW: track actual queue state
+    
+    while True:
+        qSize = queue.qsize()
+        unfinished = queue._unfinished_tasks
+        busyCount = unfinished - qSize
+        
+        # NEW: Create snapshot of current state
+        currentSnapshot = (qSize, unfinished, busyCount)
+        
+        if unfinished > 0:
+            # Check if ANYTHING changed (queue size, processing count, etc)
+            if currentSnapshot == lastQueueSnapshot:
+                # Truly stuck - same exact state
+                elapsed = (datetime.utcnow() - lastProgress).total_seconds()
+                if elapsed > 300:  # 5 minutes with ZERO change
+                    stuckCount += 1
+                    print(f"\n[WARNING] Workers appear stuck for {elapsed:.0f}s")
+                    print(f"[WARNING] Queue: {qSize} | Processing: {busyCount} | Unfinished: {unfinished}")
+                    
+                    if stuckCount >= 3:  # 15 minutes total stuck
+                        print(f"\n[DEADLOCK] Workers stuck for 15+ minutes - forcing completion")
+                        print(f"[DEADLOCK] Cancelling {len(workers)} workers...")
+                        
+                        # Force-complete remaining tasks
+                        for _ in range(unfinished):
+                            try:
+                                queue.task_done()
+                            except ValueError:
+                                break
+                        
+                        return
+            else:
+                # SOMETHING changed - reset
+                lastProgress = datetime.utcnow()
+                lastQueueSnapshot = currentSnapshot
+                stuckCount = 0
+            
+            print(f"   [Heartbeat] Queue: {qSize} | Processing: {busyCount} | Total: {unfinished}")
+        else:
+            return  # All done
+            
+        await asyncio.sleep(10)
 
-async def worker(queue, G, chatVars, fxStore, verbosity, semaphore):
-    """Async worker that processes nodes from queue with semaphore limits"""
+
+async def worker(queue, G, chatVars, fxStore, verbosity, semaphore, workerID=0):
+    """Async worker that processes nodes from queue - FAIL FAST on errors"""
     while True:
         currentNode = await queue.get()
+        startTime = datetime.utcnow()
+        errorOccurred = False
+        
         try:
+            if verbosity >= 2:
+                print(f"[Worker-{workerID}] Started: {currentNode}")
+                
             async with semaphore:
-                # Run blocking logic in thread to avoid freezing loop
-                nextNodes = await asyncio.to_thread(processNodeStep, 
-                                                    currentNode, 
-                                                    G, 
-                                                    chatVars, 
-                                                    fxStore, 
-                                                    verbosity)
-            
+                # Add timeout to prevent infinite hangs
+                try:
+                    nextNodes = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            processNodeStep,
+                            currentNode,
+                            G,
+                            chatVars,
+                            fxStore,
+                            verbosity
+                        ),
+                        timeout=900  # 15 minute max per node
+                    )
+                except asyncio.TimeoutError:
+                    elapsed = (datetime.utcnow() - startTime).total_seconds()
+                    print(f"\n[TIMEOUT] Worker-{workerID}: Node '{currentNode}' exceeded 15 minutes ({elapsed:.0f}s)")
+                    errorOccurred = True
+                    raise Exception(f"Node '{currentNode}' timed out after {elapsed:.0f}s")
+
+            if verbosity >= 2:
+                elapsed = (datetime.utcnow() - startTime).total_seconds()
+                print(f"[Worker-{workerID}] Completed: {currentNode} ({elapsed:.1f}s)")
+                
+            # Add next nodes to queue
             for node in sorted(nextNodes):
                 queue.put_nowait(node)
                 
+        except asyncio.CancelledError:
+            # Worker cancelled during shutdown - this is expected
+            if verbosity >= 2:
+                print(f"[Worker-{workerID}] Cancelled while processing: {currentNode}")
+            raise
         except Exception as e:
-            print(f"Error processing node {currentNode}: {e}")
+            # Fatal error - log and propagate
+            if not errorOccurred:
+                elapsed = (datetime.utcnow() - startTime).total_seconds()
+                print(f"\n[FATAL] Worker-{workerID}: Node '{currentNode}' failed after {elapsed:.1f}s")
+            raise  # Propagate to stop graph
         finally:
+            # ALWAYS mark task done to prevent deadlock
             queue.task_done()
 
 
-
 async def walkChatNetAsync(G, fxStore, varStore, verbosity, numWorkers=4):
-    """Orchestrates async graph traversal"""
+    """Async graph traversal - FAIL FAST but return partial results"""
     queue = asyncio.Queue()
     queue.put_nowait('Start')
-    
+
     chatVars = deepcopy(varStore)
     fxStore = fxStore | baseFx
     semaphore = asyncio.Semaphore(numWorkers)
-    
+
     workers = []
     for i in range(numWorkers):
-        workerTask = asyncio.create_task(worker(queue, G, chatVars, fxStore, verbosity, semaphore))
+        workerTask = asyncio.create_task(
+            worker(queue, G, chatVars, fxStore, verbosity, semaphore, workerID=i)
+        )
         workers.append(workerTask)
+
+    monitorTask = asyncio.create_task(monitor(queue, workers))
     
-    await queue.join()
-    
-    for w in workers:
-        w.cancel()
+    try:
+        await queue.join()
+        #print("\n[SUCCESS] Graph completed successfully")
+    except Exception as e:
+        print(f"\n[STOPPED] Graph execution stopped: {e}")
+        #print("[INFO] Returning partial results from completed nodes")
+    finally:
+        # Cleanup workers
+        for w in workers:
+            w.cancel()
+        monitorTask.cancel()
         
-    await asyncio.gather(*workers, return_exceptions=True)
-    
+        # Wait for cancellation to complete
+        await asyncio.gather(*workers, monitorTask, return_exceptions=True)
+
     return chatVars
 
 
-    
 def walkChatNet(G,
                 fxStore=dict(),
                 varStore=dict(),
                 verbosity=1,
                 runAsync=False,
                 numWorkers=4):
-    """Walks the chat network, interrogating data through all available paths"""
+    """Main entry point for graph traversal"""
     global useCache
-    
-    if runAsync:
-        print(f"Starting Async Walk with {numWorkers} workers...")
-        try:
-            # Check for existing event loop (Jupyter fix)
+
+    try:
+        if runAsync:
             try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = None
+                # Handle Jupyter notebook event loop
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = None
 
-            if loop and loop.is_running():
-                import nest_asyncio
-                nest_asyncio.apply()
-            
-            return asyncio.run(walkChatNetAsync(G, fxStore, varStore, verbosity, numWorkers))
-            
-        except ImportError:
-            print("Error: To run async in Jupyter, please install 'nest_asyncio'.")
-            return varStore
-        except KeyboardInterrupt:
-            print("\nAsync execution interrupted by user.")
-            return varStore
-    else:
-        toAsk = ['Start']
-        fxStore = fxStore | baseFx
-        chatVars = deepcopy(varStore)
-        
-        while toAsk != []:
-            nextQ = toAsk.pop()
-            nextNodes = processNodeStep(nextQ, G, chatVars, fxStore, verbosity)
-            toAsk += nextNodes
-            
-        return chatVars
+                if loop and loop.is_running():
+                    import nest_asyncio
+                    nest_asyncio.apply()
 
+                result = asyncio.run(walkChatNetAsync(G, fxStore, varStore, verbosity, numWorkers))
+                return result
 
+            except ImportError:
+                print("[Error] Install 'nest_asyncio' for Jupyter async support")
+                return varStore
+        else:
+            # Synchronous execution
+            toAsk = ['Start']
+            fxStore = fxStore | baseFx
+            chatVars = deepcopy(varStore)
 
+            while toAsk != []:
+                nextQ = toAsk.pop()
+                nextNodes = processNodeStep(nextQ, G, chatVars, fxStore, verbosity)
+                toAsk += nextNodes
+
+            return chatVars
+
+    except KeyboardInterrupt:
+        print("\n[!] Execution interrupted by user.")
+        return varStore
 
 
 #########################################
-#                                       #
-#     QUERY CACHING FUNCTIONS           #
-#                                       #
+#                                       #
+#      QUERY CACHING FUNCTIONS          #
+#                                       #
 #########################################
-
 
 
 def getHash(query):
-    """For a given query, returns a hash str"""
+    """Generate MD5 hash of query"""
     hasher = hashlib.md5()
     encoded = str(query).encode('utf-8')
     hasher.update(encoded)
@@ -473,35 +821,27 @@ def getHash(query):
     return result
 
 
-
 def queryToCache(query,
-                 maxAttempts = 2,
-                 tolerant = True,
+                 maxAttempts=3,
+                 tolerant=False,
                  delay=.05):
-    """Attempts to eval a given str query, pulling from cache if found or caching if new and successful"""
+    """Execute query with caching"""
     global useCache
-    
-    queryHash = getHash(query)
-    
-    if useCache:
-        conn = sqlite3.connect(cacheDatabase)
-        cursor = conn.cursor()
-        cursor.execute("SELECT response FROM cache WHERE hash = ?", (queryHash,))
-        row = cursor.fetchone()
-        conn.close()
-        
-        if row:
-            try:
-                result = json.loads(row[0])
-                return result
-            except json.JSONDecodeError:
-                pass 
 
+    queryHash = getHash(query)
+
+    # --- READ FROM CACHE ---
+    if useCache:
+        cached = cacheGet(queryHash)
+        if cached is not None:
+            return cached
+
+    # --- EXECUTE QUERY ---
     sleep(promptDelay)
     gotResults = False
     attempts = 0
     result = None
-    
+
     while not gotResults and attempts < maxAttempts:
         if tolerant:
             try:
@@ -514,84 +854,79 @@ def queryToCache(query,
             result = eval(query)
             gotResults = True
             attempts = maxAttempts
-    
+
+    # --- WRITE TO CACHE ---
     if gotResults:
-        try:
-            conn = sqlite3.connect(cacheDatabase)
-            cursor = conn.cursor()
-            cursor.execute(
-                "INSERT OR REPLACE INTO cache (hash, query, response) VALUES (?, ?, ?)",
-                (queryHash, str(query), json.dumps(result))
-            )
-            conn.commit()
-            conn.close()
-        except Exception as e:
-            print(f"Cache write failed: {e}")
+        cacheSet(queryHash, query, result)
 
     return result
 
 
-
 def scrapePage(url):
-    """Pulls a beautifulsoup representation of a page"""
+    """Fetch webpage content"""
     response = requests.get(url)
     statusCode = response.status_code
     if statusCode == 200:
         return response.text
     else:
-        raise ValueError(f"Page returned unscrapable status code {statusCode}")
-    
+        raise ValueError(f"Page returned status {statusCode}")
 
 
 def cachePage(url):
-    """Attempts to scrape a page, pulling from cache if found or caching if new and successful"""
+    """Cached page scraping"""
     result = queryToCache(f"st.scrapePageText('{url}')")
     return result
 
 
-
 def cacheGeocode(locText):
-    """Attempts to geocode a location via osmnx"""
+    """Cached geocoding with validation"""
+    if locText is None or pd.isna(locText) or str(locText).strip() == "":
+        return None
+
+    safeLoc = repr(locText)
+    query = f"osmnx.geocode({safeLoc})"
+
     try:
-        result = queryToCache(f"osmnx.geocode('{locText}')")
-    except:
+        result = queryToCache(query)
+    except Exception as e:
+        print(f"[Geocode] Failed on {locText}: {e}")
         return None
-    if type(result) not in (list,tuple):
+
+    if type(result) not in (list, tuple):
         return None
+
     return list(result)
 
 
-
 #########################################
-#                                       #
-#     LANGUAGE HANDLING                 #
-#                                       #
+#                                       #
+#      LANGUAGE HANDLING                #
+#                                       #
 #########################################
 
 
 def getLanguageName(code):
-    """Returns language name from language codes, defaulting to english"""
+    """Convert language code to name"""
     lang = pycountry.languages.get(alpha_2=code)
     return lang.name if lang else "English"
 
 
-
 def translateOne(text):
-    """Global arg-heavy text translation function"""
+    """Translate text to target language"""
     languageName = getLanguageName(targetLanguage)
     translationPersona = f"You are a highly accurate and fluent {languageName} translator."
     translationPrompt = f"Translate the following text to {languageName}. Output only the translated text. Do not include any markdown, explanations, commentary, variable placeholders, or descriptive text.\n\n{text.strip()}"
-    
+
     translation = askChatQuestion(translationPrompt,
                                   translationPersona,
-                                  tokens = maxTranslateTokens,
-                                  model = translationModel)
+                                  tokens=maxTranslateTokens,
+                                  model=translationModel)
     return translation
 
 
 def getLanguage(text):
-    """Checks language of text"""
-    if text in {'',None,np.nan}:
+    """Detect language of text"""
+    if text in {'', None, np.nan}:
         language = "unidentified"
     else:
         try:
@@ -603,39 +938,37 @@ def getLanguage(text):
 
 def autoTranslate(dfIn,
                   column,
-                  targetLanguage = 'en',
-                  model = modelName):
-    """Automatically translates all values in one column that are not in the target language"""
+                  targetLanguage='en',
+                  model=modelName):
+    """Auto-translate DataFrame column"""
     df = dfIn.copy(deep=True)
     langOut = f'{column}_language'
     textOut = f'{column}_translated'
-    df.loc[:,langOut] = df[column].apply(getLanguage)
-    df.loc[:,textOut] = df[column]
-    df.loc[df[langOut] != targetLanguage,textOut] = df.loc[df[langOut] != targetLanguage,textOut].apply(translateOne)
+    df.loc[:, langOut] = df[column].apply(getLanguage)
+    df.loc[:, textOut] = df[column]
+    df.loc[df[langOut] != targetLanguage, textOut] = df.loc[df[langOut] != targetLanguage, textOut].apply(translateOne)
 
     return df
 
 
-
 #########################################
-#                                       #
-#     CHAT QUERIES                      #
-#                                       #
+#                                       #
+#      CHAT QUERIES                     #
+#                                       #
 #########################################
 
 
-
-def testRoutes(query = 'How many Rs are there in strawberry?',
-               persona = 'an AI assistant',
-               autoformatPersona = True):
-    """Quick method to test models from config/model_routes.py"""
+def testRoutes(query='How many Rs are there in strawberry?',
+               persona='an AI assistant',
+               autoformatPersona=True):
+    """Test all model routes"""
     working = []
     for model in modelRoutes.index.sort_values():
         try:
             response = askChatQuestion(query,
                                        persona,
-                                       autoformatPersona = autoformatPersona,
-                                       model = model)
+                                       autoformatPersona=autoformatPersona,
+                                       model=model)
             print(f'{model} ~ {response}\n')
             working.append(model)
         except:
@@ -643,122 +976,129 @@ def testRoutes(query = 'How many Rs are there in strawberry?',
     return working
 
 
-
 def getChatContent(messages,
                    tokens,
                    modelName,
-                   temperature = None,
-                   seed = None):
-    """Wrapper to load chat content from OpenAI"""
+                   temperature=None,
+                   seed=None,
+                   timeout=600):
+    """Get completion from LLM with timeout - FAIL FAST on errors"""
     modelRoute, ip = getModelRoute(modelName)
-    content = completion(model = modelRoute,
-                         max_tokens = int(tokens),
-                         messages = messages,
-                         api_base = ip,
-                         seed = seed,
-                         temperature = temperature)
-    cleaned = content.choices[0].message.content.strip() if content.choices[0].message.content else ''
-    return cleaned
-
+    
+    try:
+        content = completion(
+            model=modelRoute,
+            max_tokens=int(tokens),
+            messages=messages,
+            api_base=ip,
+            seed=seed,
+            temperature=temperature,
+            timeout=timeout
+        )
+        cleaned = content.choices[0].message.content.strip() if content.choices[0].message.content else ''
+        return cleaned
+    except Exception as e:
+        # Fail immediately - don't retry with garbage data downstream
+        raise e
 
 
 def askChatQuestion(prompt,
                     persona,
-                    model = modelName,
-                    autoformatPersona = None,
-                    tokens = 2000,
-                    temperature = None,
-                    seed = None):
-    """Simple method to ask a single chat question"""
-    
+                    model=modelName,
+                    autoformatPersona=None,
+                    tokens=2000,
+                    temperature=None,
+                    seed=None):
+    """Ask a question to the chat model"""
+
     if autoformatPersona is True and persona.strip()[-1] != '.':
         personaText = f'You are {persona}. You must answer questions as {persona}.'
     else:
         personaText = persona
-    
-    messages = [{'role':'system',
-                 'content':personaText},
-                {'role':'user',
-                 'content':prompt[:350000]}]
 
-    query = f"getChatContent({messages},{tokens},'{model}',{temperature},{seed})"
-    result = queryToCache(query)
+    messages = [
+        {'role': 'system', 'content': personaText},
+        {'role': 'user', 'content': prompt[:350000]}
+    ]
+
+    query = f"getChatContent({messages},{tokens},'{model}',{temperature},{seed}, timeout=600)"
+    result = queryToCache(query, tolerant=False)
     return result
 
 
-
 def getYN(text):
-    """Input cleaner to standardize yes or no answers"""
-    messages = [{'role':'system',
-                 'content':'You are an API that standardizes yes or no answers. You may only return a one word answer in lowercase or "None" as appropriate.'},
-                {'role':'user',
-                 'content':f'Please return a value for the following text, coding the ouput as "yes" for any affirmative response, "no" for any negative response: {text}'}]
+    """Standardize yes/no answers"""
+    messages = [
+        {'role': 'system',
+         'content': 'You are an API that standardizes yes or no answers. You may only return a one word answer in lowercase or "None" as appropriate.'},
+        {'role': 'user',
+         'content': f'Please return a value for the following text, coding the ouput as "yes" for any affirmative response, "no" for any negative response: {text}'}
+    ]
 
     query = f"getChatContent({messages},3,'gemma3:12b')"
     result = queryToCache(query)
     if result:
-        result = result.lower().replace('"','')
+        result = result.lower().replace('"', '')
     else:
-        result = "no" 
+        result = "no"
     return result
-
 
 
 def ynToBool(evaluation):
-    """Input cleaner to convert yes or no answers to boolean"""
+    """Convert yes/no text to boolean"""
     textAnswer = getYN(evaluation)
     textAnswer = ''.join(i for i in textAnswer if i.isalnum())
     if not textAnswer: return False
-    result = {'y':True,
-              'n':False}.get(textAnswer[0].lower(), False)
+    result = {'y': True, 'n': False}.get(textAnswer[0].lower(), False)
     return result
-
 
 
 def evaluateAnswer(question, response):
-    messages = [{'role':'system',
-                 'content':'You are a debate moderator skilled at identifying the presence of answer in long statements'},
-                {'role':'user',
-                 'content':f'Please answer in one short sentence, does the following answer provide any useable answer for the provided question?\nquestion: {question}\nanswer: {response}'}]
+    """Evaluate if response answers question"""
+    messages = [
+        {'role': 'system',
+         'content': 'You are a debate moderator skilled at identifying the presence of answer in long statements'},
+        {'role': 'user',
+         'content': f'Please answer in one short sentence, does the following answer provide any useable answer for the provided question?\nquestion: {question}\nanswer: {response}'}
+    ]
 
     query = f"getChatContent({messages},100,'{modelName}')"
     result = queryToCache(query)
-
     return result
-
 
 
 def evaluateAuthor(response):
-    messages = [{'role':'user',
-                 'content':f'Please answer in one short sentence, does the author of the following answer include any text specically identifying itself as an AI?\nanswer: {response}'}]
+    """Check if response identifies as AI"""
+    messages = [
+        {'role': 'user',
+         'content': f'Please answer in one short sentence, does the author of the following answer include any text specically identifying itself as an AI?\nanswer: {response}'}
+    ]
 
     query = f"getChatContent({messages},100,'{modelName}')"
     result = queryToCache(query)
-
     return result
 
 
-
-def isUseful(question,response):
-    answerEval = evaluateAnswer(question,response)
+def isUseful(question, response):
+    """Determine if response is useful"""
+    answerEval = evaluateAnswer(question, response)
     authorEval = evaluateAuthor(response)
     answerYN = getYN(answerEval)
     authorYN = getYN(authorEval)
     print(f'is answer:{answerYN}\tis AI: {authorYN}')
 
     result = answerYN == 'yes' and authorYN == 'no'
-
     return result
 
 
-
 def getColor(text):
-    messages = [{'role':'system',
-                 'content':'You are a python API that returns the first named color found in a sample of text. You may only return one word in lowercase or None if no color is found.'},
-                {'role':'user',
-                 'content':f'Please return a value for the following text: {text}'}]
+    """Extract color from text"""
+    messages = [
+        {'role': 'system',
+         'content': 'You are a python API that returns the first named color found in a sample of text. You may only return one word in lowercase or None if no color is found.'},
+        {'role': 'user', 'content': f'Please return a value for the following text: {text}'}
+    ]
 
     query = f"getChatContent({messages},3,'{modelName}')"
     result = queryToCache(query)
-
     return result
