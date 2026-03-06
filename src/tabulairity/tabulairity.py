@@ -499,8 +499,33 @@ def buildChatNet(script, show=False):
         print(f"[Warning] Chat graph has disconnected components.")
 
     if show:
-        pass
+        pos = nx.kamada_kawai_layout(G)
+        pos = nx.spring_layout(G,
+                               pos=pos,
+                               iterations=10)
+        colors = [mapEdgeColor(i[2]) for i in G.edges]
 
+        fig,ax = plt.subplots(figsize=(10,10))
+        nx.draw_networkx_edges(G,
+                               pos = pos,
+                               edge_color = colors,
+                               connectionstyle="arc3,rad=0.1",
+                               alpha = .6)
+        
+        nx.draw_networkx_nodes(G,
+                               pos = pos,
+                               alpha = .6)
+        
+        nx.draw_networkx_labels(G,
+                               pos = pos)
+        
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.spines['bottom'].set_visible(False)
+        ax.spines['left'].set_visible(False)
+        plt.savefig('lastplot.png')
+        
+                
     return G
 
 
@@ -618,144 +643,93 @@ def processNodeStep(currentNode, G, chatVars, fxStore, verbosity):
         raise  # Re-raise to stop entire graph
 
 
-async def monitor(queue, workers):
-    """Heartbeat monitor with deadlock detection"""
-    lastProgress = datetime.utcnow()
-    lastUnfinished = 0
-    stuckCount = 0
-    lastQueueSnapshot = None  # NEW: track actual queue state
+async def process_one_node(node, G, chatVars, fxStore, verbosity, semaphore, workerID=0):
+    """Process single node and return its children"""
+    startTime = datetime.utcnow()
     
-    while True:
-        qSize = queue.qsize()
-        unfinished = queue._unfinished_tasks
-        busyCount = unfinished - qSize
+    try:
+        if verbosity >= 2:
+            print(f"[Worker-{workerID}] Started: {node}")
         
-        # NEW: Create snapshot of current state
-        currentSnapshot = (qSize, unfinished, busyCount)
-        
-        if unfinished > 0:
-            # Check if ANYTHING changed (queue size, processing count, etc)
-            if currentSnapshot == lastQueueSnapshot:
-                # Truly stuck - same exact state
-                elapsed = (datetime.utcnow() - lastProgress).total_seconds()
-                if elapsed > 300:  # 5 minutes with ZERO change
-                    stuckCount += 1
-                    print(f"\n[WARNING] Workers appear stuck for {elapsed:.0f}s")
-                    print(f"[WARNING] Queue: {qSize} | Processing: {busyCount} | Unfinished: {unfinished}")
-                    
-                    if stuckCount >= 3:  # 15 minutes total stuck
-                        print(f"\n[DEADLOCK] Workers stuck for 15+ minutes - forcing completion")
-                        print(f"[DEADLOCK] Cancelling {len(workers)} workers...")
-                        
-                        # Force-complete remaining tasks
-                        for _ in range(unfinished):
-                            try:
-                                queue.task_done()
-                            except ValueError:
-                                break
-                        
-                        return
-            else:
-                # SOMETHING changed - reset
-                lastProgress = datetime.utcnow()
-                lastQueueSnapshot = currentSnapshot
-                stuckCount = 0
-            
-            print(f"   [Heartbeat] Queue: {qSize} | Processing: {busyCount} | Total: {unfinished}")
-        else:
-            return  # All done
-            
-        await asyncio.sleep(10)
-
-
-async def worker(queue, G, chatVars, fxStore, verbosity, semaphore, workerID=0):
-    """Async worker that processes nodes from queue - FAIL FAST on errors"""
-    while True:
-        currentNode = await queue.get()
-        startTime = datetime.utcnow()
-        errorOccurred = False
-        
-        try:
-            if verbosity >= 2:
-                print(f"[Worker-{workerID}] Started: {currentNode}")
-                
-            async with semaphore:
-                # Add timeout to prevent infinite hangs
-                try:
-                    nextNodes = await asyncio.wait_for(
-                        asyncio.to_thread(
-                            processNodeStep,
-                            currentNode,
-                            G,
-                            chatVars,
-                            fxStore,
-                            verbosity
-                        ),
-                        timeout=900  # 15 minute max per node
-                    )
-                except asyncio.TimeoutError:
-                    elapsed = (datetime.utcnow() - startTime).total_seconds()
-                    print(f"\n[TIMEOUT] Worker-{workerID}: Node '{currentNode}' exceeded 15 minutes ({elapsed:.0f}s)")
-                    errorOccurred = True
-                    raise Exception(f"Node '{currentNode}' timed out after {elapsed:.0f}s")
-
-            if verbosity >= 2:
+        async with semaphore:
+            try:
+                nextNodes = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        processNodeStep,
+                        node,
+                        G,
+                        chatVars,
+                        fxStore,
+                        verbosity
+                    ),
+                    timeout=1500  # 15 minute max per node
+                )
+            except asyncio.TimeoutError:
                 elapsed = (datetime.utcnow() - startTime).total_seconds()
-                print(f"[Worker-{workerID}] Completed: {currentNode} ({elapsed:.1f}s)")
-                
-            # Add next nodes to queue
-            for node in sorted(nextNodes):
-                queue.put_nowait(node)
-                
-        except asyncio.CancelledError:
-            # Worker cancelled during shutdown - this is expected
-            if verbosity >= 2:
-                print(f"[Worker-{workerID}] Cancelled while processing: {currentNode}")
-            raise
-        except Exception as e:
-            # Fatal error - log and propagate
-            if not errorOccurred:
-                elapsed = (datetime.utcnow() - startTime).total_seconds()
-                print(f"\n[FATAL] Worker-{workerID}: Node '{currentNode}' failed after {elapsed:.1f}s")
-            raise  # Propagate to stop graph
-        finally:
-            # ALWAYS mark task done to prevent deadlock
-            queue.task_done()
+                print(f"\n[TIMEOUT] Node '{node}' exceeded 15 minutes ({elapsed:.0f}s)")
+                raise Exception(f"Node '{node}' timed out after {elapsed:.0f}s")
+        
+        if verbosity >= 2:
+            elapsed = (datetime.utcnow() - startTime).total_seconds()
+            print(f"[Worker-{workerID}] Completed: {node} ({elapsed:.1f}s)")
+        
+        return nextNodes
+        
+    except Exception as e:
+        elapsed = (datetime.utcnow() - startTime).total_seconds()
+        print(f"\n[FATAL] Node '{node}' failed after {elapsed:.1f}s")
+        raise
 
 
 async def walkChatNetAsync(G, fxStore, varStore, verbosity, numWorkers=4):
-    """Async graph traversal - FAIL FAST but return partial results"""
-    queue = asyncio.Queue()
-    queue.put_nowait('Start')
-
+    """Async graph traversal with wave-based processing"""
     chatVars = deepcopy(varStore)
     fxStore = fxStore | baseFx
     semaphore = asyncio.Semaphore(numWorkers)
-
-    workers = []
-    for i in range(numWorkers):
-        workerTask = asyncio.create_task(
-            worker(queue, G, chatVars, fxStore, verbosity, semaphore, workerID=i)
-        )
-        workers.append(workerTask)
-
-    monitorTask = asyncio.create_task(monitor(queue, workers))
+    
+    currentWave = ['Start']
+    waveNumber = 0
     
     try:
-        await queue.join()
-        #print("\n[SUCCESS] Graph completed successfully")
+        while currentWave:
+            waveNumber += 1
+            if verbosity > 0:
+                if len(currentWave) <= 10:
+                    print(f"\n[Wave {waveNumber}] Processing {len(currentWave)} nodes: {currentWave}")
+                else:
+                    print(f"\n[Wave {waveNumber}] Processing {len(currentWave)} nodes: {currentWave[:10]} ... and {len(currentWave) - 10} more")
+            
+            # Create tasks for all nodes in current wave
+            tasks = []
+            for idx, node in enumerate(currentWave):
+                task = asyncio.create_task(
+                    process_one_node(node, G, chatVars, fxStore, verbosity, semaphore, workerID=idx % numWorkers)
+                )
+                tasks.append((node, task))
+            
+            # Wait for ALL nodes in this wave to complete
+            nextWave = []
+            for node, task in tasks:
+                try:
+                    childNodes = await task
+                    nextWave.extend(childNodes)
+                except Exception as e:
+                    print(f"\n[FATAL] Wave {waveNumber} failed on node '{node}'")
+                    raise
+            
+            # Remove duplicates, sort for next wave
+            currentWave = sorted(set(nextWave), reverse=True)
+        
+        if verbosity > 0:
+            print(f"\n[Complete] Processed {waveNumber} waves")
+    
+    except KeyboardInterrupt:
+        print("\n[!] Execution interrupted by user.")
+        raise
     except Exception as e:
         print(f"\n[STOPPED] Graph execution stopped: {e}")
-        #print("[INFO] Returning partial results from completed nodes")
-    finally:
-        # Cleanup workers
-        for w in workers:
-            w.cancel()
-        monitorTask.cancel()
-        
-        # Wait for cancellation to complete
-        await asyncio.gather(*workers, monitorTask, return_exceptions=True)
-
+        raise
+    
     return chatVars
 
 

@@ -7,7 +7,8 @@ from time import sleep
 
 
 
-def scrapePageText(url: str) -> str:
+def scrapePageText(url: str,
+                  maxLen = 100000) -> str:
     """
     Fetches a webpage's HTML, parses it with BeautifulSoup, and extracts
     clean, sentence-structured text content.
@@ -49,7 +50,7 @@ def scrapePageText(url: str) -> str:
         cleanedText = '\n'.join(proseLines)
         cleanedText = re.sub(r'\n\s*\n', '\n\n', cleanedText)
 
-        return cleanedText.strip()
+        return cleanedText.strip()[:maxLen]
 
     except requests.exceptions.RequestException as e:
         return f"Error: Could not retrieve the webpage. Please check the URL and your connection. Details: {e}"
