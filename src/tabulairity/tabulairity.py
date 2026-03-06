@@ -846,9 +846,9 @@ def scrapePage(url):
         raise ValueError(f"Page returned status {statusCode}")
 
 
-def cachePage(url):
+def cachePage(url, maxLen = 100000):
     """Cached page scraping"""
-    result = queryToCache(f"st.scrapePageText('{url}')")
+    result = queryToCache(f"st.scrapePageText('{url}',maxLen={maxLen})")
     return result
 
 
