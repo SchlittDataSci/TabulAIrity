@@ -474,21 +474,6 @@ def buildChatNet(script, show=False):
     if 'model' not in script.columns:
         script.loc[:, 'model'] = modelName
 
-    # Parse extra_params column: expects JSON object or empty/null → None
-    if 'extra_params' in script.columns:
-        def parseExtraParams(val):
-            if val is None or (isinstance(val, float) and pd.isna(val)) or str(val).strip() == '':
-                return None
-            try:
-                parsed = json.loads(val)
-                return parsed if isinstance(parsed, dict) else None
-            except (json.JSONDecodeError, TypeError):
-                print(f"[Warning] Could not parse extra_params value: {val!r}")
-                return None
-        script['extra_params'] = script['extra_params'].apply(parseExtraParams)
-    else:
-        script['extra_params'] = None
-
     chatEdges = script[script.type == 'edge']
     chatNodes = script[script.type == 'node']
     G = nx.MultiDiGraph()
@@ -499,8 +484,7 @@ def buildChatNet(script, show=False):
                      'persona': row['persona'],
                      'tokens': row['tokens'],
                      'self_eval': row['self_eval'],
-                     'model': row['model'],
-                     'extra_params': row['extra_params']}) for index, row in chatNodes.T.items()]
+                     'model': row['model']}) for index, row in chatNodes.T.items()]
 
     G.add_nodes_from(nodesParsed)
 
@@ -577,7 +561,6 @@ def processNodeStep(currentNode, G, chatVars, fxStore, verbosity):
         persona = nodeVars['persona']
         rowModel = nodeVars['model']
         selfEval = nodeVars['self_eval']
-        extraParams = nodeVars.get('extra_params', None)
     except Exception:
         print(f"\n[ERROR] Node '{currentNode}' preparation failed")
         traceback.print_exc()
@@ -599,8 +582,7 @@ def processNodeStep(currentNode, G, chatVars, fxStore, verbosity):
                 chatResponse = askChatQuestion(prompt,
                                                 persona,
                                                 model=rowModel,
-                                                tokens=tokens,
-                                                extra_params=extraParams)
+                                                tokens=tokens)
 
                 if verbosity > 0:
                     print(f"   <<< Finished '{currentNode}': {chatResponse[:100]}...")
@@ -973,8 +955,7 @@ def getChatContent(messages,
                    modelName,
                    temperature=None,
                    seed=None,
-                   timeout=600,
-                   extra_params=None):
+                   timeout=600):
     """Get completion from LLM with timeout - FAIL FAST on errors"""
     modelRoute, ip = getModelRoute(modelName)
     
@@ -986,8 +967,7 @@ def getChatContent(messages,
             api_base=ip,
             seed=seed,
             temperature=temperature,
-            timeout=timeout,
-            **({"extra_body": extra_params} if extra_params else {})
+            timeout=timeout
         )
         cleaned = content.choices[0].message.content.strip() if content.choices[0].message.content else ''
         return cleaned
@@ -1002,8 +982,7 @@ def askChatQuestion(prompt,
                     autoformatPersona=None,
                     tokens=2000,
                     temperature=None,
-                    seed=None,
-                    extra_params=None):
+                    seed=None):
     """Ask a question to the chat model"""
 
     if autoformatPersona is True and persona.strip()[-1] != '.':
@@ -1016,7 +995,7 @@ def askChatQuestion(prompt,
         {'role': 'user', 'content': prompt[:350000]}
     ]
 
-    query = f"getChatContent({messages},{tokens},'{model}',{temperature},{seed},timeout=600,extra_params={repr(extra_params)})"
+    query = f"getChatContent({messages},{tokens},'{model}',{temperature},{seed}, timeout=600)"
     result = queryToCache(query, tolerant=False)
     return result
 
