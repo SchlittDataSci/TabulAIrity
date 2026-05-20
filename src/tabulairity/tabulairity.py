@@ -813,14 +813,34 @@ def getHash(query):
     return result
 
 
-def queryToCache(query,
+def queryToCache(cacheKey,
+                 fn,
+                 args=(),
+                 kwargs=None,
                  maxAttempts=3,
                  tolerant=False,
                  delay=.05):
-    """Execute query with caching"""
+    """Execute a callable with caching.
+
+    Parameters
+    ----------
+    cacheKey : str
+        Stable string used to derive the cache hash (replaces the old eval
+        query string – keep the same value the caller used to build before so
+        existing cache entries are still hit).
+    fn : callable
+        The function to call when no cached result is found.
+    args : tuple
+        Positional arguments forwarded to *fn*.
+    kwargs : dict | None
+        Keyword arguments forwarded to *fn*.
+    """
     global useCache
 
-    queryHash = getHash(query)
+    if kwargs is None:
+        kwargs = {}
+
+    queryHash = getHash(cacheKey)
 
     # --- READ FROM CACHE ---
     if useCache:
@@ -837,19 +857,19 @@ def queryToCache(query,
     while not gotResults and attempts < maxAttempts:
         if tolerant:
             try:
-                result = eval(query)
+                result = fn(*args, **kwargs)
                 gotResults = True
-            except:
+            except Exception:
                 attempts += 1
                 sleep(5)
         else:
-            result = eval(query)
+            result = fn(*args, **kwargs)
             gotResults = True
             attempts = maxAttempts
 
     # --- WRITE TO CACHE ---
     if gotResults:
-        cacheSet(queryHash, query, result)
+        cacheSet(queryHash, cacheKey, result)
 
     return result
 
@@ -866,7 +886,8 @@ def scrapePage(url):
 
 def cachePage(url, maxLen = 100000):
     """Cached page scraping"""
-    result = queryToCache(f"st.scrapePageText('{url}',maxLen={maxLen})")
+    cacheKey = f"st.scrapePageText('{url}',maxLen={maxLen})"
+    result = queryToCache(cacheKey, st.scrapePageText, args=(url,), kwargs={'maxLen': maxLen})
     return result
 
 
@@ -876,10 +897,10 @@ def cacheGeocode(locText):
         return None
 
     safeLoc = repr(locText)
-    query = f"osmnx.geocode({safeLoc})"
+    cacheKey = f"osmnx.geocode({safeLoc})"
 
     try:
-        result = queryToCache(query)
+        result = queryToCache(cacheKey, osmnx.geocode, args=(locText,))
     except Exception as e:
         print(f"[Geocode] Failed on {locText}: {e}")
         return None
@@ -1016,8 +1037,14 @@ def askChatQuestion(prompt,
         {'role': 'user', 'content': prompt[:350000]}
     ]
 
-    query = f"getChatContent({messages},{tokens},'{model}',{temperature},{seed},timeout=600,extra_params={repr(extra_params)})"
-    result = queryToCache(query, tolerant=False)
+    cacheKey = f"getChatContent({messages},{tokens},'{model}',{temperature},{seed},timeout=600,extra_params={repr(extra_params)})"
+    result = queryToCache(
+        cacheKey,
+        getChatContent,
+        args=(messages, tokens, model),
+        kwargs={'temperature': temperature, 'seed': seed, 'timeout': 600, 'extra_params': extra_params},
+        tolerant=False,
+    )
     return result
 
 
@@ -1030,8 +1057,8 @@ def getYN(text):
          'content': f'Please return a value for the following text, coding the ouput as "yes" for any affirmative response, "no" for any negative response: {text}'}
     ]
 
-    query = f"getChatContent({messages},3,'gemma3:12b')"
-    result = queryToCache(query)
+    cacheKey = f"getChatContent({messages},3,'gemma3:12b')"
+    result = queryToCache(cacheKey, getChatContent, args=(messages, 3, 'gemma3:12b'))
     if result:
         result = result.lower().replace('"', '')
     else:
@@ -1057,8 +1084,8 @@ def evaluateAnswer(question, response):
          'content': f'Please answer in one short sentence, does the following answer provide any useable answer for the provided question?\nquestion: {question}\nanswer: {response}'}
     ]
 
-    query = f"getChatContent({messages},100,'{modelName}')"
-    result = queryToCache(query)
+    cacheKey = f"getChatContent({messages},100,'{modelName}')"
+    result = queryToCache(cacheKey, getChatContent, args=(messages, 100, modelName))
     return result
 
 
@@ -1069,8 +1096,8 @@ def evaluateAuthor(response):
          'content': f'Please answer in one short sentence, does the author of the following answer include any text specically identifying itself as an AI?\nanswer: {response}'}
     ]
 
-    query = f"getChatContent({messages},100,'{modelName}')"
-    result = queryToCache(query)
+    cacheKey = f"getChatContent({messages},100,'{modelName}')"
+    result = queryToCache(cacheKey, getChatContent, args=(messages, 100, modelName))
     return result
 
 
@@ -1094,6 +1121,6 @@ def getColor(text):
         {'role': 'user', 'content': f'Please return a value for the following text: {text}'}
     ]
 
-    query = f"getChatContent({messages},3,'{modelName}')"
-    result = queryToCache(query)
+    cacheKey = f"getChatContent({messages},3,'{modelName}')"
+    result = queryToCache(cacheKey, getChatContent, args=(messages, 3, modelName))
     return result
