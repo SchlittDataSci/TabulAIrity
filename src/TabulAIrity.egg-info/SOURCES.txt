@@ -4,6 +4,7 @@ LICENSE
 README.md
 pyproject.toml
 requirements.txt
+setup.py
 dist/TabulAIrity-1.0.0-py3-none-any.whl
 dist/TabulAIrity-1.0.1-py3-none-any.whl
 dist/TabulAIrity-1.0.2-py3-none-any.whl
@@ -20,4 +21,7 @@ src/TabulAIrity.egg-info/SOURCES.txt
 src/TabulAIrity.egg-info/dependency_links.txt
 src/TabulAIrity.egg-info/top_level.txt
 src/tabulairity/__init__.py
-src/tabulairity/tabulairity.py
+src/tabulairity/core.py
+src/tabulairity/gsheetconnector.py
+src/tabulairity/scrapertools.py
+src/tabulairity/selfimprovement.py
