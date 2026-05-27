@@ -4,7 +4,7 @@ import numpy as np
 
 
 # import scrapertools as st
-from tabulairity import scrapertools as st
+from . import scrapertools as st
 
 from datetime import datetime
 from copy import deepcopy
@@ -390,13 +390,7 @@ prepEnvironment()
 
 
 def getModelRoute(name):
-    """Return litellm-compatible model string and proxy base URL.
-
-    litellm requires a provider prefix when using a proxy endpoint.
-    Models already carrying a provider prefix are passed through unchanged.
-    """
-    if '/' not in name:
-        name = f'openai/{name}'
+    """Return model name and litellm proxy base URL"""
     return name, endpoint
 
 
@@ -666,10 +660,7 @@ async def process_one_node(node, G, chatVars, fxStore, verbosity, semaphore, wor
 
 async def walkChatNetAsync(G, fxStore, varStore, verbosity, numWorkers=4):
     """Async graph traversal with wave-based processing"""
-    if isinstance(varStore, pd.Series):
-        chatVars = varStore.to_dict()
-    else:
-        chatVars = dict(varStore) if varStore is not None else {}
+    chatVars = deepcopy(varStore)
     fxStore = fxStore | baseFx
     semaphore = asyncio.Semaphore(numWorkers)
     
@@ -982,7 +973,6 @@ def getChatContent(messages,
             max_tokens=int(tokens),
             messages=messages,
             api_base=ip,
-            api_key=os.environ.get('OPENAI_API_KEY', 'dummy'),
             seed=seed,
             temperature=temperature,
             timeout=timeout,
