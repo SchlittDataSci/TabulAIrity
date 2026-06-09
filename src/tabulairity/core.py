@@ -360,27 +360,54 @@ targetLanguage = 'en'
 translationModel = "gemma3:27b"
 
 
+def _parseEnvLines(lines):
+    """Parse key = value lines from a config file.
+
+    Handles:
+      - Plain strings:  FOO = bar
+      - JSON values:    ROUTE_KEYS = {"host:port": "KEY_NAME"}
+      - Inline comments stripped after # (only for non-JSON values)
+      - Blank lines and comment-only lines ignored
+    """
+    result = {}
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        if ' = ' not in line:
+            continue
+        arg, _, raw = line.partition(' = ')
+        arg = arg.strip()
+        raw = raw.strip()
+        # Strip inline comment only when value is not JSON
+        if not raw.startswith(('{', '[')):
+            raw = raw.split('#')[0].strip()
+        result[arg] = raw
+    return result
+
+
 def prepEnvironment():
-    """Load environment args and config"""
+    """Load environment args and config.
+
+    environment_args.txt values are stored in os.environ as raw strings.
+    JSON dict/list values (ROUTE_KEYS etc.) are stored as-is and parsed
+    at point of use via json.loads().
+    """
     credentialsRef = 'config/environment_args.txt'
     if os.path.exists(credentialsRef):
-        with open(credentialsRef) as credentials:
-            lines = credentials.readlines()
-        for line in lines:
-            if ' = ' in line:
-                [arg, value] = [i.strip() for i in line.split(' = ')][:2]
-                os.environ[arg] = value
+        with open(credentialsRef) as f:
+            parsed = _parseEnvLines(f.readlines())
+        for arg, value in parsed.items():
+            os.environ[arg] = value
     else:
         print("[Config] Environment args not found. Using defaults.")
 
     configRef = 'config/config.txt'
     if os.path.exists(configRef):
-        with open(configRef) as configs:
-            lines = configs.readlines()
-        for line in lines:
-            if ' = ' in line:
-                [arg, value] = [i.strip() for i in line.split(' = ')][:2]
-                config[arg] = value
+        with open(configRef) as f:
+            parsed = _parseEnvLines(f.readlines())
+        for arg, value in parsed.items():
+            config[arg] = value
 
 
 # prepEnvironment must run before endpoint is assigned so LITELLM_URL is available
@@ -428,19 +455,25 @@ def getModelRoute(name):
     The optional 'key' column in model_routes.csv lets each row carry its own
     API key (e.g. OPENWEBUI_KEY for OWUI rows, OPENAI_API_KEY for paid APIs).
     If the column is absent or blank the appropriate env var is used instead.
+
+    Namespace prefixes (e.g. 'owui/') are stripped before lookup so callers
+    can tag models for clarity without confusing litellm's provider detection.
     """
+    # Strip any namespace prefix (e.g. 'owui/', 'litellm/') — the routing table's
+    # 'route' column holds the correct litellm-facing prefix (e.g. 'openai/...')
+    if '/' in name:
+        name = name.split('/', 1)[1]
+
     if _modelRoutes is not None and name in _modelRoutes.index:
         row = _modelRoutes.loc[name]
         ip = row['ip']
         route = row['route']
-        # Per-row key column takes priority; fall back to env vars by port
-        if 'key' in _modelRoutes.columns and pd.notna(row.get('key', None)) and str(row['key']).strip():
-            apiKey = os.environ.get(str(row['key']), 'dummy')
-        elif ':3000' in ip:
-            apiKey = os.environ.get('OPENWEBUI_KEY', 'dummy')
-        else:
-            apiKey = os.environ.get('OPENAI_API_KEY', 'dummy')
-        return route, ip, apiKey
+        # Look up the correct key env var for this host:port via ROUTE_KEYS
+        # e.g. ROUTE_KEYS = {"<host>:<port>": "OPENWEBUI_KEY"}
+        routeKeys = json.loads(os.environ.get('ROUTE_KEYS', '{}'))
+        host = ip.split('://')[-1].split('/')[0]  # extract host:port
+        keyVar = routeKeys.get(host, 'OPENAI_API_KEY')
+        return route, ip, os.environ.get(keyVar, 'dummy')
     else:
         if '/' not in name:
             name = f'openai/{name}'
