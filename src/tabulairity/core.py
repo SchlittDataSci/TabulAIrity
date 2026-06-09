@@ -360,9 +360,6 @@ targetLanguage = 'en'
 translationModel = "gemma3:27b"
 
 
-endpoint = 'http://localhost:4000/v1'
-
-
 def prepEnvironment():
     """Load environment args and config"""
     credentialsRef = 'config/environment_args.txt'
@@ -386,18 +383,68 @@ def prepEnvironment():
                 config[arg] = value
 
 
+# prepEnvironment must run before endpoint is assigned so LITELLM_URL is available
 prepEnvironment()
+
+endpoint = os.environ.get('LITELLM_URL', 'http://localhost:4000/v1')
+
+
+#########################################
+#                                       #
+#      MODEL ROUTING TABLE              #
+#                                       #
+#########################################
+
+_modelRoutes = None
+
+def loadModelRoutes(csvPath='config/model_routes.csv'):
+    """Load model routing table from CSV.
+
+    Expected columns: model, route, ip
+    Optional column:  key  (API key override per row; falls back to env vars if absent)
+
+    Can be called again at runtime to hot-reload the table, e.g.:
+        import core; core.loadModelRoutes('config/model_routes_dev.csv')
+    """
+    global _modelRoutes
+    if os.path.exists(csvPath):
+        _modelRoutes = pd.read_csv(csvPath).set_index('model')
+        print(f"[Routes] Loaded {len(_modelRoutes)} model routes from {csvPath}")
+    else:
+        _modelRoutes = None
+        print(f"[Routes] No routing table found at {csvPath}, using LITELLM_URL fallback")
+
+
+loadModelRoutes()
 
 
 def getModelRoute(name):
-    """Return litellm-compatible model string and proxy base URL.
+    """Return (litellm model string, base URL, api key) for a given model name.
 
-    litellm requires a provider prefix when using a proxy endpoint.
-    Models already carrying a provider prefix are passed through unchanged.
+    Resolution order:
+      1. model_routes.csv lookup  — uses route, ip, and optional key column
+      2. LITELLM_URL fallback     — wraps bare names with openai/ prefix as before
+
+    The optional 'key' column in model_routes.csv lets each row carry its own
+    API key (e.g. OPENWEBUI_KEY for OWUI rows, OPENAI_API_KEY for paid APIs).
+    If the column is absent or blank the appropriate env var is used instead.
     """
-    if '/' not in name:
-        name = f'openai/{name}'
-    return name, endpoint
+    if _modelRoutes is not None and name in _modelRoutes.index:
+        row = _modelRoutes.loc[name]
+        ip = row['ip']
+        route = row['route']
+        # Per-row key column takes priority; fall back to env vars by port
+        if 'key' in _modelRoutes.columns and pd.notna(row.get('key', None)) and str(row['key']).strip():
+            apiKey = os.environ.get(str(row['key']), 'dummy')
+        elif ':3000' in ip:
+            apiKey = os.environ.get('OPENWEBUI_KEY', 'dummy')
+        else:
+            apiKey = os.environ.get('OPENAI_API_KEY', 'dummy')
+        return route, ip, apiKey
+    else:
+        if '/' not in name:
+            name = f'openai/{name}'
+        return name, endpoint, os.environ.get('OPENAI_API_KEY', 'dummy')
 
 
 #########################################
