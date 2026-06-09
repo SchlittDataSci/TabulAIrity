@@ -1021,7 +1021,7 @@ def getChatContent(messages,
                    timeout=600,
                    extra_params=None):
     """Get completion from LLM with timeout - FAIL FAST on errors"""
-    modelRoute, ip = getModelRoute(modelName)
+    modelRoute, ip, apiKey = getModelRoute(modelName)
     
     try:
         content = completion(
@@ -1029,7 +1029,7 @@ def getChatContent(messages,
             max_tokens=int(tokens),
             messages=messages,
             api_base=ip,
-            api_key=os.environ.get('OPENAI_API_KEY', 'dummy'),
+            api_key=apiKey,
             seed=seed,
             temperature=temperature,
             timeout=timeout,
