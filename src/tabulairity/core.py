@@ -448,33 +448,30 @@ loadModelRoutes()
 def getModelRoute(name):
     """Return (litellm model string, base URL, api key) for a given model name.
 
-    Resolution order:
-      1. model_routes.csv lookup  — uses route, ip, and optional key column
-      2. LITELLM_URL fallback     — wraps bare names with openai/ prefix as before
+    Two mutually exclusive modes:
+      - model_routes.csv present: all routing from table; unknown models fail loudly.
+      - model_routes.csv absent:  single-endpoint mode via LITELLM_URL env var.
 
-    The optional 'key' column in model_routes.csv lets each row carry its own
-    API key (e.g. OPENWEBUI_KEY for OWUI rows, OPENAI_API_KEY for paid APIs).
-    If the column is absent or blank the appropriate env var is used instead.
-
-    Namespace prefixes (e.g. 'owui/') are stripped before lookup so callers
-    can tag models for clarity without confusing litellm's provider detection.
+    Namespace prefixes (e.g. 'owui/') are stripped before lookup — the routing
+    table's 'route' column holds the correct litellm-facing prefix.
     """
-    # Strip any namespace prefix (e.g. 'owui/', 'litellm/') — the routing table's
-    # 'route' column holds the correct litellm-facing prefix (e.g. 'openai/...')
+    # Strip any caller-side namespace prefix
     if '/' in name:
         name = name.split('/', 1)[1]
 
-    if _modelRoutes is not None and name in _modelRoutes.index:
+    if _modelRoutes is not None:
+        # Table mode — hard fail on unknown models
+        if name not in _modelRoutes.index:
+            raise KeyError(f"[Routes] Model '{name}' not found in model_routes.csv. Add it before use.")
         row = _modelRoutes.loc[name]
         ip = row['ip']
         route = row['route']
-        # Look up the correct key env var for this host:port via ROUTE_KEYS
-        # e.g. ROUTE_KEYS = {"<host>:<port>": "OPENWEBUI_KEY"}
         routeKeys = json.loads(os.environ.get('ROUTE_KEYS', '{}'))
         host = ip.split('://')[-1].split('/')[0]  # extract host:port
         keyVar = routeKeys.get(host, 'OPENAI_API_KEY')
         return route, ip, os.environ.get(keyVar, 'dummy')
     else:
+        # Single-endpoint mode — use LITELLM_URL, wrap name for litellm
         if '/' not in name:
             name = f'openai/{name}'
         return name, endpoint, os.environ.get('OPENAI_API_KEY', 'dummy')
