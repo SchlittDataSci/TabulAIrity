@@ -4,7 +4,7 @@ import numpy as np
 
 
 # import scrapertools as st
-from . import scrapertools as st
+from tabulairity import scrapertools as st
 
 from datetime import datetime
 from copy import deepcopy
@@ -360,38 +360,117 @@ targetLanguage = 'en'
 translationModel = "gemma3:27b"
 
 
-endpoint = 'http://localhost:4000/v1'
+def _parseEnvLines(lines):
+    """Parse key = value lines from a config file.
+
+    Handles:
+      - Plain strings:  FOO = bar
+      - JSON values:    ROUTE_KEYS = {"host:port": "KEY_NAME"}
+      - Inline comments stripped after # (only for non-JSON values)
+      - Blank lines and comment-only lines ignored
+    """
+    result = {}
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        if ' = ' not in line:
+            continue
+        arg, _, raw = line.partition(' = ')
+        arg = arg.strip()
+        raw = raw.strip()
+        # Strip inline comment only when value is not JSON
+        if not raw.startswith(('{', '[')):
+            raw = raw.split('#')[0].strip()
+        result[arg] = raw
+    return result
 
 
 def prepEnvironment():
-    """Load environment args and config"""
+    """Load environment args and config.
+
+    environment_args.txt values are stored in os.environ as raw strings.
+    JSON dict/list values (ROUTE_KEYS etc.) are stored as-is and parsed
+    at point of use via json.loads().
+    """
     credentialsRef = 'config/environment_args.txt'
     if os.path.exists(credentialsRef):
-        with open(credentialsRef) as credentials:
-            lines = credentials.readlines()
-        for line in lines:
-            if ' = ' in line:
-                [arg, value] = [i.strip() for i in line.split(' = ')][:2]
-                os.environ[arg] = value
+        with open(credentialsRef) as f:
+            parsed = _parseEnvLines(f.readlines())
+        for arg, value in parsed.items():
+            os.environ[arg] = value
     else:
         print("[Config] Environment args not found. Using defaults.")
 
     configRef = 'config/config.txt'
     if os.path.exists(configRef):
-        with open(configRef) as configs:
-            lines = configs.readlines()
-        for line in lines:
-            if ' = ' in line:
-                [arg, value] = [i.strip() for i in line.split(' = ')][:2]
-                config[arg] = value
+        with open(configRef) as f:
+            parsed = _parseEnvLines(f.readlines())
+        for arg, value in parsed.items():
+            config[arg] = value
 
 
+# prepEnvironment must run before endpoint is assigned so LITELLM_URL is available
 prepEnvironment()
+
+endpoint = os.environ.get('LITELLM_URL', 'http://localhost:4000/v1')
+
+
+#########################################
+#                                       #
+#      MODEL ROUTING TABLE              #
+#                                       #
+#########################################
+
+_modelRoutes = None
+
+def loadModelRoutes(csvPath='config/model_routes.csv'):
+    """Load model routing table from CSV.
+
+    Expected columns: model, route, ip
+    Optional column:  key  (API key override per row; falls back to env vars if absent)
+
+    Can be called again at runtime to hot-reload the table, e.g.:
+        import core; core.loadModelRoutes('config/model_routes_dev.csv')
+    """
+    global _modelRoutes
+    if os.path.exists(csvPath):
+        _modelRoutes = pd.read_csv(csvPath).set_index('model')
+        print(f"[Routes] Loaded {len(_modelRoutes)} model routes from {csvPath}")
+    else:
+        _modelRoutes = None
+        print(f"[Routes] No routing table found at {csvPath}, using LITELLM_URL fallback")
+
+
+loadModelRoutes()
 
 
 def getModelRoute(name):
-    """Return model name and litellm proxy base URL"""
-    return name, endpoint
+    """Return (litellm model string, base URL, api key) for a given model name.
+
+    All models must be defined in model_routes.csv. Unrecognised models raise
+    a KeyError immediately rather than silently falling back to a wrong endpoint.
+
+    Namespace prefixes (e.g. 'owui/') are stripped before lookup — the routing
+    table's 'route' column holds the correct litellm-facing prefix.
+    """
+    # Strip any caller-side namespace prefix
+    if '/' in name:
+        name = name.split('/', 1)[1]
+
+    if _modelRoutes is None:
+        raise RuntimeError("[Routes] No routing table loaded. Check config/model_routes.csv exists.")
+
+    if name not in _modelRoutes.index:
+        raise KeyError(f"[Routes] Model '{name}' not found in model_routes.csv. Add it before use.")
+
+    row = _modelRoutes.loc[name]
+    ip = row['ip']
+    route = row['route']
+    routeKeys = json.loads(os.environ.get('ROUTE_KEYS', '{}'))
+    host = ip.split('://')[-1].split('/')[0]  # extract host:port
+    keyVar = routeKeys.get(host, 'OPENAI_API_KEY')
+    return route, ip, os.environ.get(keyVar, 'dummy')
 
 
 #########################################
@@ -660,7 +739,10 @@ async def process_one_node(node, G, chatVars, fxStore, verbosity, semaphore, wor
 
 async def walkChatNetAsync(G, fxStore, varStore, verbosity, numWorkers=4):
     """Async graph traversal with wave-based processing"""
-    chatVars = deepcopy(varStore)
+    if isinstance(varStore, pd.Series):
+        chatVars = varStore.to_dict()
+    else:
+        chatVars = dict(varStore) if varStore is not None else {}
     fxStore = fxStore | baseFx
     semaphore = asyncio.Semaphore(numWorkers)
     
@@ -965,7 +1047,7 @@ def getChatContent(messages,
                    timeout=600,
                    extra_params=None):
     """Get completion from LLM with timeout - FAIL FAST on errors"""
-    modelRoute, ip = getModelRoute(modelName)
+    modelRoute, ip, apiKey = getModelRoute(modelName)
     
     try:
         content = completion(
@@ -973,6 +1055,7 @@ def getChatContent(messages,
             max_tokens=int(tokens),
             messages=messages,
             api_base=ip,
+            api_key=apiKey,
             seed=seed,
             temperature=temperature,
             timeout=timeout,

@@ -3,7 +3,7 @@ import pandas as pd
 from random import randint
 from datetime import datetime
 
-import tabulairity as tb
+from tabulairity import core as tb
 import gsheetconnector as gs
 
 
