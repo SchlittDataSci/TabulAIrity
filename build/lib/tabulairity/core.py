@@ -493,6 +493,24 @@ def showIfValid(var):
         print(var)
 
 
+# Node names reserved for walkChatNet() debugging output. Nodes may not use these
+# keys because walkChatNet() writes 'success' and 'errors' into the returned
+# chatVars dict, and a colliding node name would silently overwrite (or be
+# overwritten by) that debugging metadata.
+RESERVED_NODE_NAMES = {'success', 'errors'}
+
+
+def _validateReservedNodeNames(chatNodes):
+    """Raise if the script defines a node named 'success' or 'errors'."""
+    conflicts = set(chatNodes['key']) & RESERVED_NODE_NAMES
+    if conflicts:
+        raise ValueError(
+            f"Node name(s) {sorted(conflicts)} are reserved and cannot be used. "
+            f"'success' and 'errors' are reserved keys that walkChatNet() adds to "
+            f"its returned dict."
+        )
+
+
 def mapEdgeColor(fx):
     if fx == 'null':
         return 'black'
@@ -529,6 +547,7 @@ def buildChatNet(script, show=False):
 
     chatEdges = script[script.type == 'edge']
     chatNodes = script[script.type == 'node']
+    _validateReservedNodeNames(chatNodes)
     G = nx.MultiDiGraph()
 
     nodesParsed = [(row['key'],
@@ -605,7 +624,17 @@ baseFx = {'isYes': lambda x, y: ynToBool(x),
 
 
 def processNodeStep(currentNode, G, chatVars, fxStore, verbosity):
-    """Process a single node - FAIL FAST on errors to prevent garbage data propagation"""
+    """Process a single node.
+
+    Returns (nextNodes, nodeErrors). nodeErrors is a list of structured error
+    records - {<node/edge name>: <error message>, 'type': 'node' | 'edge'} -
+    for every node or edge fx failure encountered while processing this node.
+    Node/edge fx failures are never raised or silently swallowed here; they are
+    always recorded so callers (walkChatNet / walkChatNetAsync) can decide,
+    based on the `tolerant` flag, whether to stop the whole traversal or
+    continue with partial completion. If this node fails, it does not
+    activate any outgoing edges (nextNodes will be empty for that failure)."""
+    nodeErrors = []
     nodeVars = G.nodes[currentNode]
 
     # --- BLOCK 1: PREPARATION ---
@@ -616,15 +645,16 @@ def processNodeStep(currentNode, G, chatVars, fxStore, verbosity):
         rowModel = nodeVars['model']
         selfEval = nodeVars['self_eval']
         extraParams = nodeVars.get('extra_params', None)
-    except Exception:
+    except Exception as e:
         print(f"\n[ERROR] Node '{currentNode}' preparation failed")
         traceback.print_exc()
-        return []
+        nodeErrors.append({currentNode: f"Preparation failed: {e}", 'type': 'node'})
+        return [], nodeErrors
 
     failed = False
     chatResponse = ""
 
-    # --- BLOCK 2: EXTERNAL I/O (Fail Fast - No Retries) ---
+    # --- BLOCK 2: EXTERNAL I/O ---
     try:
         if validRun(persona, prompt):
             if not str(prompt).startswith('recall:'):
@@ -650,11 +680,11 @@ def processNodeStep(currentNode, G, chatVars, fxStore, verbosity):
             chatVars[currentNode + '_raw'] = chatResponse
 
     except Exception as e:
-        # FAIL FAST: Any error stops the graph
-        print(f"\n[FATAL] Node '{currentNode}' failed - stopping graph to prevent garbage data")
+        print(f"\n[ERROR] Node '{currentNode}' failed during execution")
         print(f"Error: {str(e)[:200]}")
         traceback.print_exc()
-        raise  # Re-raise to stop entire graph
+        nodeErrors.append({currentNode: str(e), 'type': 'node'})
+        return [], nodeErrors
 
     # --- BLOCK 3: POST-PROCESSING ---
     try:
@@ -667,8 +697,9 @@ def processNodeStep(currentNode, G, chatVars, fxStore, verbosity):
             try:
                 cleanedResponse = fxStore[nodeVars['fx']](chatResponse, chatVars)
             except Exception as fxErr:
-                print(f"[Warning] Cleaning function {nodeVars['fx']} failed: {fxErr}")
-                cleanedResponse = chatResponse
+                print(f"[ERROR] Node fx '{nodeVars['fx']}' failed on node '{currentNode}': {fxErr}")
+                nodeErrors.append({currentNode: f"Node fx '{nodeVars['fx']}' failed: {fxErr}", 'type': 'node'})
+                return [], nodeErrors
 
             chatVars[currentNode] = cleanedResponse
             if verbosity > 0:
@@ -682,8 +713,15 @@ def processNodeStep(currentNode, G, chatVars, fxStore, verbosity):
         if not failed:
             edgesFromQ = G.out_edges([currentNode], data=True)
             for start, end, edgeData in edgesFromQ:
-                edgeResult = fxStore[edgeData['fx']](chatResponse, chatVars)
-                chatVars[f'{start}-{end}'] = edgeResult
+                edgeName = f'{start}-{end}'
+                try:
+                    edgeResult = fxStore[edgeData['fx']](chatResponse, chatVars)
+                except Exception as edgeErr:
+                    print(f"[ERROR] Edge fx '{edgeData['fx']}' failed on edge '{edgeName}': {edgeErr}")
+                    nodeErrors.append({edgeName: f"Edge fx '{edgeData['fx']}' failed: {edgeErr}", 'type': 'edge'})
+                    continue  # skip this edge; other edges from this node may still succeed
+
+                chatVars[edgeName] = edgeResult
 
                 if str(edgeResult).lower() == 'true':
                     nextNodes.append(end)
@@ -691,25 +729,31 @@ def processNodeStep(currentNode, G, chatVars, fxStore, verbosity):
                     showIfValid(edgePrompt)
 
         nextNodes.sort(reverse=True)
-        return nextNodes
+        return nextNodes, nodeErrors
 
-    except Exception:
-        print(f"\n[FATAL] Node '{currentNode}' edge evaluation failed")
+    except Exception as e:
+        print(f"\n[ERROR] Node '{currentNode}' edge evaluation failed")
         traceback.print_exc()
-        raise  # Re-raise to stop entire graph
+        nodeErrors.append({currentNode: str(e), 'type': 'node'})
+        return [], nodeErrors
 
 
 async def process_one_node(node, G, chatVars, fxStore, verbosity, semaphore, workerID=0):
-    """Process single node and return its children"""
+    """Process single node and return (nextNodes, nodeErrors).
+
+    Errors (including timeouts and unexpected exceptions) are recorded as
+    structured entries rather than raised, so a single node failure can't
+    take down the entire async traversal - walkChatNetAsync decides whether
+    to stop based on the `tolerant` flag."""
     startTime = datetime.utcnow()
-    
+
     try:
         if verbosity >= 2:
             print(f"[Worker-{workerID}] Started: {node}")
         
         async with semaphore:
             try:
-                nextNodes = await asyncio.wait_for(
+                nextNodes, nodeErrors = await asyncio.wait_for(
                     asyncio.to_thread(
                         processNodeStep,
                         node,
@@ -722,23 +766,38 @@ async def process_one_node(node, G, chatVars, fxStore, verbosity, semaphore, wor
                 )
             except asyncio.TimeoutError:
                 elapsed = (datetime.utcnow() - startTime).total_seconds()
-                print(f"\n[TIMEOUT] Node '{node}' exceeded 15 minutes ({elapsed:.0f}s)")
-                raise Exception(f"Node '{node}' timed out after {elapsed:.0f}s")
+                msg = f"Node '{node}' timed out after {elapsed:.0f}s"
+                print(f"\n[ERROR] {msg}")
+                return [], [{node: msg, 'type': 'node'}]
         
         if verbosity >= 2:
             elapsed = (datetime.utcnow() - startTime).total_seconds()
             print(f"[Worker-{workerID}] Completed: {node} ({elapsed:.1f}s)")
         
-        return nextNodes
+        return nextNodes, nodeErrors
         
     except Exception as e:
         elapsed = (datetime.utcnow() - startTime).total_seconds()
-        print(f"\n[FATAL] Node '{node}' failed after {elapsed:.1f}s")
-        raise
+        msg = f"Node '{node}' failed unexpectedly after {elapsed:.1f}s: {e}"
+        print(f"\n[ERROR] {msg}")
+        traceback.print_exc()
+        return [], [{node: msg, 'type': 'node'}]
 
 
-async def walkChatNetAsync(G, fxStore, varStore, verbosity, numWorkers=4):
-    """Async graph traversal with wave-based processing"""
+async def walkChatNetAsync(G, fxStore, varStore, verbosity, numWorkers=4, tolerant=False):
+    """Async graph traversal with wave-based processing.
+
+    If tolerant is False (default), traversal stops after the current wave
+    finishes if any node/edge in that wave produced an error (nodes already
+    dispatched in that wave are allowed to complete, since they're running
+    concurrently, but no further waves are started). If tolerant is True,
+    traversal continues across all reachable waves regardless of errors,
+    enabling partial completion.
+
+    Returns chatVars with two additional keys:
+      - 'success': True only if every reachable node ran without error
+      - 'errors': list of {<node/edge name>: <message>, 'type': 'node'|'edge'}
+    """
     if isinstance(varStore, pd.Series):
         chatVars = varStore.to_dict()
     else:
@@ -748,7 +807,9 @@ async def walkChatNetAsync(G, fxStore, varStore, verbosity, numWorkers=4):
     
     currentWave = ['Start']
     waveNumber = 0
-    
+    errors = []
+    stopped = False
+
     try:
         while currentWave:
             waveNumber += 1
@@ -769,13 +830,19 @@ async def walkChatNetAsync(G, fxStore, varStore, verbosity, numWorkers=4):
             # Wait for ALL nodes in this wave to complete
             nextWave = []
             for node, task in tasks:
-                try:
-                    childNodes = await task
-                    nextWave.extend(childNodes)
-                except Exception as e:
-                    print(f"\n[FATAL] Wave {waveNumber} failed on node '{node}'")
-                    raise
-            
+                childNodes, nodeErrors = await task
+                if nodeErrors:
+                    errors.extend(nodeErrors)
+                    if not tolerant:
+                        stopped = True
+                        continue  # don't chain children of a failed node
+                nextWave.extend(childNodes)
+
+            if stopped:
+                if verbosity > 0:
+                    print(f"\n[STOPPED] Wave {waveNumber} hit an error; halting before the next wave (tolerant=False)")
+                break
+
             # Remove duplicates, sort for next wave
             currentWave = sorted(set(nextWave), reverse=True)
         
@@ -784,11 +851,13 @@ async def walkChatNetAsync(G, fxStore, varStore, verbosity, numWorkers=4):
     
     except KeyboardInterrupt:
         print("\n[!] Execution interrupted by user.")
+        errors.append({'walkChatNet': 'Execution interrupted by user (KeyboardInterrupt)', 'type': 'node'})
+        chatVars['success'] = False
+        chatVars['errors'] = errors
         raise
-    except Exception as e:
-        print(f"\n[STOPPED] Graph execution stopped: {e}")
-        raise
-    
+
+    chatVars['success'] = len(errors) == 0
+    chatVars['errors'] = errors
     return chatVars
 
 
@@ -797,8 +866,22 @@ def walkChatNet(G,
                 varStore=dict(),
                 verbosity=1,
                 runAsync=False,
-                numWorkers=4):
-    """Main entry point for graph traversal"""
+                numWorkers=4,
+                tolerant=False):
+    """Main entry point for graph traversal.
+
+    Node/edge fx failures are never allowed to crash unpredictably or vanish
+    silently. Every failure is recorded in the returned dict's 'errors' list.
+
+    If tolerant is False (default), the traversal stops as soon as an error is
+    hit (no further nodes are processed). If tolerant is True, the traversal
+    continues past errors, skipping only the branch(es) affected, to allow
+    partial completion.
+
+    The returned dict always includes:
+      - 'success': True only if every reachable node ran without error
+      - 'errors': list of {<node/edge name>: <message>, 'type': 'node'|'edge'}
+    """
     global useCache
 
     try:
@@ -814,28 +897,46 @@ def walkChatNet(G,
                     import nest_asyncio
                     nest_asyncio.apply()
 
-                result = asyncio.run(walkChatNetAsync(G, fxStore, varStore, verbosity, numWorkers))
+                result = asyncio.run(walkChatNetAsync(G, fxStore, varStore, verbosity, numWorkers, tolerant))
                 return result
 
             except ImportError:
                 print("[Error] Install 'nest_asyncio' for Jupyter async support")
-                return varStore
+                result = dict(varStore) if not isinstance(varStore, dict) else deepcopy(varStore)
+                result['success'] = False
+                result['errors'] = [{
+                    'walkChatNet': "Missing 'nest_asyncio' dependency required for async execution inside an active event loop",
+                    'type': 'node',
+                }]
+                return result
         else:
             # Synchronous execution
             toAsk = ['Start']
             fxStore = fxStore | baseFx
             chatVars = deepcopy(varStore)
+            errors = []
 
             while toAsk != []:
                 nextQ = toAsk.pop()
-                nextNodes = processNodeStep(nextQ, G, chatVars, fxStore, verbosity)
+                nextNodes, nodeErrors = processNodeStep(nextQ, G, chatVars, fxStore, verbosity)
+                if nodeErrors:
+                    errors.extend(nodeErrors)
+                    if not tolerant:
+                        if verbosity > 0:
+                            print(f"\n[STOPPED] Error hit on '{nextQ}'; halting traversal (tolerant=False)")
+                        break
                 toAsk += nextNodes
 
+            chatVars['success'] = len(errors) == 0
+            chatVars['errors'] = errors
             return chatVars
 
     except KeyboardInterrupt:
         print("\n[!] Execution interrupted by user.")
-        return varStore
+        result = dict(varStore) if not isinstance(varStore, dict) else deepcopy(varStore)
+        result['success'] = False
+        result['errors'] = [{'walkChatNet': 'Execution interrupted by user (KeyboardInterrupt)', 'type': 'node'}]
+        return result
 
 
 #########################################
