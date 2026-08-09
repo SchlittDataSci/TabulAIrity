@@ -603,6 +603,16 @@ def buildChatNet(script, show=False):
 
 
 def insertChatVars(text, varStore):
+    """Substitute [key] placeholders from varStore into text.
+
+    Non-string input (NaN from an empty sheet cell, None) is returned
+    unchanged so callers can still apply their own validity checks.
+    Placeholders with no matching key are left alone, so literal bracket
+    text - output labels like [yes]/[no], or illustrative examples - passes
+    through untouched.
+    """
+    if not isinstance(text, str):
+        return text
     for key, value in varStore.items():
         toReplace = f'[{key}]'
         text = text.replace(toReplace, str(value))
@@ -641,7 +651,12 @@ def processNodeStep(currentNode, G, chatVars, fxStore, verbosity):
     try:
         prompt = insertChatVars(nodeVars['prompt'], chatVars)
         tokens = nodeVars['tokens']
-        persona = nodeVars['persona']
+        # The persona is substituted on the same terms as the prompt. It was
+        # previously passed through raw, which meant any [variable] written
+        # into a persona reached the model as literal text - a silent failure,
+        # since nothing raises on an unresolved placeholder. Personas are the
+        # natural home for role and criteria, so they need the same treatment.
+        persona = insertChatVars(nodeVars['persona'], chatVars)
         rowModel = nodeVars['model']
         selfEval = nodeVars['self_eval']
         extraParams = nodeVars.get('extra_params', None)
