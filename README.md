@@ -14,7 +14,7 @@ Rather than relying on single-shot prompts, TabulAIrity constructs directed grap
 
 ## Modules
 
-### `tabulairity.py` (Core)
+### `core.py` (Core)
 The primary engine for the framework.
 * **Network Construction:** Converts configuration DataFrames into executable `NetworkX` graphs (`buildChatNet`).
 * **Execution:** Traverses the graph (`walkChatNet`), managing state (variables), executing prompts, and handling branching logic.
@@ -42,21 +42,30 @@ TabulAIrity relies on a specific directory structure for configuration and cachi
 ### Environment Setup
 Create a `config/` directory in the project root containing the following:
 
-1.  **`environment_args.txt`**: Stores API keys.
+1.  **`environment_args.txt`**: Stores API keys and proxy settings.
     ```text
     OPENAI_API_KEY = sk-...
     GEMINI_API_KEY = ...
+    LITELLM_URL = http://localhost:4000/v1
+    # Map host:port from model_routes.csv to the env var holding that host's key
+    ROUTE_KEYS = {"localhost:11434": "OPENAI_API_KEY", "my-remote-host:80": "GEMINI_API_KEY"}
     ```
 2.  **`model_routes.csv`**: Defines available models and endpoints.
     ```csv
-    model,route,ip
-    gemma3:12b,gemma3:12b,http://localhost:11434
-    gpt-4o,gpt-4o,remote
+    model,route,ip,key
+    gemma3:12b,ollama/gemma3:12b,http://localhost:11434,
+    gpt-4o,gpt-4o,http://remote.example.com:80,
     ```
+    The optional `key` column lets you override the API key per route; otherwise the
+    key is looked up via `ROUTE_KEYS` (host → env var name) and falls back to
+    `OPENAI_API_KEY`.
 3.  **`config.txt`**: General runtime settings (e.g., paths to Google Service credentials).
 
 ### Caching
-The system automatically generates a `TabulAIrityCache/` directory. This stores MD5 hashed responses for every LLM query and scrape request. Clear this directory to force fresh execution.
+The system automatically creates a `TabulAIrityCache.db` SQLite database (or a
+PostgreSQL `cache` table when `psycopg2` is installed and configured) to store
+MD5-hashed responses for every LLM query and scrape request. Clear/delete the
+database to force fresh execution.
 
 ## Usage Example
 
@@ -82,7 +91,7 @@ print(results['final_output_node'])
 
 ### Automated Prompt Improvement
 ```python
-import selfimprovement as si
+from tabulairity import selfimprovement as si
 
 # Iterate on a prompt to maximize accuracy against a test dataframe
 optimized_history = si.iteratePrompt(

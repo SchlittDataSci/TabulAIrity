@@ -2,7 +2,7 @@ import gspread
 import feedparser
 
 import pandas as pd
-from tabulairity import core as tb
+from . import core as tb
 
 import re
 

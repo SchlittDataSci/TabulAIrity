@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools", "setuptools-scm"]
+requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -11,12 +11,36 @@ authors = [
 description = "Chat network based interrogation of unstructured text"
 readme = "README.md"
 requires-python = ">=3.8"
-license = {text = "GPL-3.0-or-later"} # Add this line instead
+license = {text = "GPL-3.0-or-later"}
 classifiers = [
     "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
     "Operating System :: OS Independent",
 ]
+dependencies = [
+    "pandas",
+    "numpy",
+    "networkx",
+    "matplotlib",
+    "litellm",
+    "beautifulsoup4",
+    "requests",
+    "geopy",
+    "pycountry",
+    "langdetect",
+    "gspread",
+    "feedparser",
+    "cohere",
+    "tiktoken",
+    "nest_asyncio",
+]
+
+[project.optional-dependencies]
+postgres = ["psycopg2-binary"]
 
 [project.urls]
 Homepage = "https://github.com/SchlittDataSci/TabulAIrity"
 Issues = "https://github.com/SchlittDataSci/TabulAIrity/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
