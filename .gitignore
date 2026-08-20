@@ -1,5 +1,5 @@
 login/*
-__pycache__
+__pycache__/
 lastplot.png
 cache/*
 tempDB.db
@@ -10,8 +10,14 @@ examples/cache/
 *.pickle
 *.geojson
 *openai.txt
-*.pickle
+*.json
 examples/input/DON*
 examples/output/DON*
-*.json
 examples/login/credentials.txt
+build/
+dist/
+*.egg-info/
+*.bak
+TabulAIrityCache.db
+config/
+.ipynb_checkpoints/

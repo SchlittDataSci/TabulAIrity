@@ -2,9 +2,7 @@ import networkx as nx
 import pandas as pd
 import numpy as np
 
-
-# import scrapertools as st
-from tabulairity import scrapertools as st
+from . import scrapertools as st
 
 from datetime import datetime
 from copy import deepcopy
@@ -19,7 +17,7 @@ import os
 import re
 import json
 import requests
-import osmnx
+from geopy.geocoders import Nominatim
 import pickle
 import hashlib
 import pycountry
@@ -1048,6 +1046,9 @@ def cachePage(url, maxLen = 100000):
     return result
 
 
+_geocoder = Nominatim(user_agent="tabulairity")
+
+
 def cacheGeocode(locText):
     """Cached geocoding with validation"""
     if locText is None or pd.isna(locText) or str(locText).strip() == "":
@@ -1057,15 +1058,15 @@ def cacheGeocode(locText):
     cacheKey = f"osmnx.geocode({safeLoc})"
 
     try:
-        result = queryToCache(cacheKey, osmnx.geocode, args=(locText,))
+        location = queryToCache(cacheKey, _geocoder.geocode, args=(locText,))
     except Exception as e:
         print(f"[Geocode] Failed on {locText}: {e}")
         return None
 
-    if type(result) not in (list, tuple):
+    if location is None or location.point is None:
         return None
 
-    return list(result)
+    return [location.point.latitude, location.point.longitude]
 
 
 #########################################

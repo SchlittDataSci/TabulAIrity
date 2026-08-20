@@ -3,8 +3,8 @@ import pandas as pd
 from random import randint
 from datetime import datetime
 
-from tabulairity import core as tb
-import gsheetconnector as gs
+from . import core as tb
+from . import gsheetconnector as gs
 
 
 verbosity = 1
