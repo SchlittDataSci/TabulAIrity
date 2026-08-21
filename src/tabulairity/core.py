@@ -26,6 +26,34 @@ import asyncio
 import traceback
 import sys
 
+# ---------------------------------------------------------------------------
+# Visualization hook flag — flipped by visualization.vizOn/vizOff.
+# Core checks this cheaply before attempting any viz work.
+# ---------------------------------------------------------------------------
+_viz_enabled = False
+
+
+def _viz_emit(event_type: str, payload: dict):
+    """Lazy viz emit — no-op when viz is off, never raises."""
+    if not _viz_enabled:
+        return
+    try:
+        from .visualization import viz_emit as _ve
+        _ve(event_type, payload)
+    except Exception:
+        pass
+
+
+def _viz_cid_for_graph(G) -> int | None:
+    """Return viz chatnet_id for G, or None."""
+    try:
+        cid = G.graph.get("viz_id")  # type: ignore
+        if cid is not None:
+            return int(cid)
+    except Exception:
+        pass
+    return None
+
 #########################################
 #                                       #
 #      POSTGRESQL CACHE BACKEND         #
@@ -595,8 +623,14 @@ def buildChatNet(script, show=False):
         ax.spines['bottom'].set_visible(False)
         ax.spines['left'].set_visible(False)
         plt.savefig('lastplot.png')
-        
-                
+
+    # ---- viz hook: announce graph load (assigns viz_id) ----
+    if _viz_enabled:
+        try:
+            from .visualization import viz_notify_graph_load
+            viz_notify_graph_load(G)
+        except Exception:
+            pass
     return G
 
 
@@ -642,6 +676,8 @@ def processNodeStep(currentNode, G, chatVars, fxStore, verbosity):
     based on the `tolerant` flag, whether to stop the whole traversal or
     continue with partial completion. If this node fails, it does not
     activate any outgoing edges (nextNodes will be empty for that failure)."""
+    # viz: resolve chatnet id once
+    _viz_cid = _viz_cid_for_graph(G) if _viz_enabled else None
     nodeErrors = []
     nodeVars = G.nodes[currentNode]
 
@@ -666,6 +702,16 @@ def processNodeStep(currentNode, G, chatVars, fxStore, verbosity):
 
     failed = False
     chatResponse = ""
+
+    # viz: node entering processing (after prompt resolved)
+    if _viz_enabled and _viz_cid is not None:
+        try:
+            from .visualization import viz_notify_node_start
+            _fullP = str(prompt) if isinstance(prompt, str) else ""
+            _fullPersona = str(persona) if isinstance(persona, str) else ""
+            viz_notify_node_start(_viz_cid, currentNode, prompt=_fullP, persona=_fullPersona, fullPrompt=_fullP)
+        except Exception:
+            pass
 
     # --- BLOCK 2: EXTERNAL I/O ---
     try:
@@ -697,6 +743,12 @@ def processNodeStep(currentNode, G, chatVars, fxStore, verbosity):
         print(f"Error: {str(e)[:200]}")
         traceback.print_exc()
         nodeErrors.append({currentNode: str(e), 'type': 'node'})
+        if _viz_enabled and _viz_cid is not None:
+            try:
+                from .visualization import viz_notify_node_error
+                viz_notify_node_error(_viz_cid, currentNode, str(e)[:500])
+            except Exception:
+                pass
         return [], nodeErrors
 
     # --- BLOCK 3: POST-PROCESSING ---
@@ -712,29 +764,64 @@ def processNodeStep(currentNode, G, chatVars, fxStore, verbosity):
             except Exception as fxErr:
                 print(f"[ERROR] Node fx '{nodeVars['fx']}' failed on node '{currentNode}': {fxErr}")
                 nodeErrors.append({currentNode: f"Node fx '{nodeVars['fx']}' failed: {fxErr}", 'type': 'node'})
+                if _viz_enabled and _viz_cid is not None:
+                    try:
+                        from .visualization import viz_notify_node_error
+                        viz_notify_node_error(_viz_cid, currentNode, f"fx {nodeVars['fx']}: {fxErr}"[:500])
+                    except Exception:
+                        pass
                 return [], nodeErrors
 
             chatVars[currentNode] = cleanedResponse
             if verbosity > 0:
                 print(f'\t-{persona}: {cleanedResponse}')
+            # viz: side panel + completed color (send full prompt/persona/fx for popup)
+            if _viz_enabled and _viz_cid is not None:
+                try:
+                    from .visualization import viz_notify_prompt_response, viz_notify_node_complete
+                    viz_notify_prompt_response(_viz_cid, currentNode, str(prompt), str(chatResponse), str(cleanedResponse), persona=str(persona), fx=str(nodeVars.get('fx','')), fullPrompt=str(prompt))
+                    viz_notify_node_complete(_viz_cid, currentNode, str(chatResponse), str(cleanedResponse))
+                except Exception:
+                    pass
         else:
             if verbosity > 0:
                 print(f'\t*FAILS: {chatResponse[:50]}...')
             failed = True
+            if _viz_enabled and _viz_cid is not None:
+                try:
+                    from .visualization import viz_notify_prompt_response, viz_notify_node_error
+                    viz_notify_prompt_response(_viz_cid, currentNode, str(prompt), str(chatResponse), "", persona=str(persona), fx=str(nodeVars.get('fx','')), fullPrompt=str(prompt))
+                    viz_notify_node_error(_viz_cid, currentNode, "self_eval failed")
+                except Exception:
+                    pass
 
         nextNodes = []
         if not failed:
             edgesFromQ = G.out_edges([currentNode], data=True)
             for start, end, edgeData in edgesFromQ:
                 edgeName = f'{start}-{end}'
+                edgeFx = edgeData.get('fx', '') if isinstance(edgeData, dict) else ''
                 try:
                     edgeResult = fxStore[edgeData['fx']](chatResponse, chatVars)
                 except Exception as edgeErr:
                     print(f"[ERROR] Edge fx '{edgeData['fx']}' failed on edge '{edgeName}': {edgeErr}")
                     nodeErrors.append({edgeName: f"Edge fx '{edgeData['fx']}' failed: {edgeErr}", 'type': 'edge'})
+                    if _viz_enabled and _viz_cid is not None:
+                        try:
+                            from .visualization import viz_notify_edge_evaluated
+                            viz_notify_edge_evaluated(_viz_cid, edgeName, False, fx=edgeFx)
+                        except Exception:
+                            pass
                     continue  # skip this edge; other edges from this node may still succeed
 
                 chatVars[edgeName] = edgeResult
+                # viz: edge evaluated color — include fx to disambiguate parallel edges
+                if _viz_enabled and _viz_cid is not None:
+                    try:
+                        from .visualization import viz_notify_edge_evaluated
+                        viz_notify_edge_evaluated(_viz_cid, edgeName, str(edgeResult).lower() == 'true', fx=edgeFx)
+                    except Exception:
+                        pass
 
                 if str(edgeResult).lower() == 'true':
                     nextNodes.append(end)
@@ -811,6 +898,19 @@ async def walkChatNetAsync(G, fxStore, varStore, verbosity, numWorkers=4, tolera
       - 'success': True only if every reachable node ran without error
       - 'errors': list of {<node/edge name>: <message>, 'type': 'node'|'edge'}
     """
+    _viz_cid = _viz_cid_for_graph(G) if _viz_enabled else None
+    if _viz_enabled and _viz_cid is None:
+        try:
+            from .visualization import viz_notify_graph_load
+            _viz_cid = viz_notify_graph_load(G)
+        except Exception:
+            pass
+    if _viz_enabled and _viz_cid is not None:
+        try:
+            from .visualization import viz_notify_node_queued
+            viz_notify_node_queued(_viz_cid, 'Start')
+        except Exception:
+            pass
     if isinstance(varStore, pd.Series):
         chatVars = varStore.to_dict()
     else:
@@ -858,6 +958,14 @@ async def walkChatNetAsync(G, fxStore, varStore, verbosity, numWorkers=4, tolera
 
             # Remove duplicates, sort for next wave
             currentWave = sorted(set(nextWave), reverse=True)
+            # viz: queued for next wave
+            if _viz_enabled and _viz_cid is not None and currentWave:
+                try:
+                    from .visualization import viz_notify_node_queued
+                    for _n in currentWave:
+                        viz_notify_node_queued(_viz_cid, _n)
+                except Exception:
+                    pass
         
         if verbosity > 0:
             print(f"\n[Complete] Processed {waveNumber} waves")
@@ -871,6 +979,12 @@ async def walkChatNetAsync(G, fxStore, varStore, verbosity, numWorkers=4, tolera
 
     chatVars['success'] = len(errors) == 0
     chatVars['errors'] = errors
+    if _viz_enabled and _viz_cid is not None:
+        try:
+            from .visualization import viz_notify_chatnet_complete
+            viz_notify_chatnet_complete(_viz_cid, chatVars['success'])
+        except Exception:
+            pass
     return chatVars
 
 
@@ -924,10 +1038,26 @@ def walkChatNet(G,
                 return result
         else:
             # Synchronous execution
+            _viz_cid = _viz_cid_for_graph(G) if _viz_enabled else None
+            # If viz was enabled after G was built, G may have no viz_id yet — allocate now
+            if _viz_enabled and _viz_cid is None:
+                try:
+                    from .visualization import viz_notify_graph_load
+                    _viz_cid = viz_notify_graph_load(G)
+                except Exception:
+                    pass
             toAsk = ['Start']
             fxStore = fxStore | baseFx
             chatVars = deepcopy(varStore)
             errors = []
+
+            # viz: initial queued
+            if _viz_enabled and _viz_cid is not None:
+                try:
+                    from .visualization import viz_notify_node_queued
+                    viz_notify_node_queued(_viz_cid, 'Start')
+                except Exception:
+                    pass
 
             while toAsk != []:
                 nextQ = toAsk.pop()
@@ -938,10 +1068,25 @@ def walkChatNet(G,
                         if verbosity > 0:
                             print(f"\n[STOPPED] Error hit on '{nextQ}'; halting traversal (tolerant=False)")
                         break
+                # viz: nodes queued
+                if _viz_enabled and _viz_cid is not None and nextNodes:
+                    try:
+                        from .visualization import viz_notify_node_queued
+                        for _n in nextNodes:
+                            viz_notify_node_queued(_viz_cid, _n)
+                    except Exception:
+                        pass
                 toAsk += nextNodes
 
             chatVars['success'] = len(errors) == 0
             chatVars['errors'] = errors
+            # viz: chatnet complete + reset (frontend schedules reset after delay, but emit both)
+            if _viz_enabled and _viz_cid is not None:
+                try:
+                    from .visualization import viz_notify_chatnet_complete
+                    viz_notify_chatnet_complete(_viz_cid, chatVars['success'])
+                except Exception:
+                    pass
             return chatVars
 
     except KeyboardInterrupt:
@@ -1218,6 +1363,13 @@ def askChatQuestion(prompt,
                     seed=None,
                     extra_params=None):
     """Ask a question to the chat model"""
+    # viz: standalone prompt (outside walkChatNet the cid will be None, still emit for side panel)
+    if _viz_enabled:
+        try:
+            from .visualization import viz_notify_standalone_prompt
+            viz_notify_standalone_prompt(str(prompt)[:500], str(persona)[:200], str(model))
+        except Exception:
+            pass
 
     if autoformatPersona is True and persona.strip()[-1] != '.':
         personaText = f'You are {persona}. You must answer questions as {persona}.'
@@ -1237,6 +1389,12 @@ def askChatQuestion(prompt,
         kwargs={'temperature': temperature, 'seed': seed, 'timeout': 600, 'extra_params': extra_params},
         tolerant=False,
     )
+    if _viz_enabled:
+        try:
+            from .visualization import viz_notify_standalone_response
+            viz_notify_standalone_response(str(prompt)[:500], str(result)[:500])
+        except Exception:
+            pass
     return result
 
 
