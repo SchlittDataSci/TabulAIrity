@@ -968,6 +968,26 @@ def getHash(query):
     return result
 
 
+import re as _re
+_GARBAGE_TOKEN_RE = _re.compile(
+    r'<(?:unused|unk|unknown|reserved|extra_id)_?\d+>',
+    _re.IGNORECASE
+)
+
+
+def _contains_garbage_tokens(value) -> bool:
+    """True if a model response contains reserved/special-vocab tokens that
+    indicate a corrupted or degenerate generation (e.g. <unused56>,
+    <unknown12>, <unk3>). These must never be cached or returned as real
+    output - treating them the same as a failed call means the next cycle
+    gets a fresh attempt rather than replaying the corruption forever."""
+    if isinstance(value, str):
+        return bool(_GARBAGE_TOKEN_RE.search(value))
+    if isinstance(value, (list, dict)):
+        return bool(_GARBAGE_TOKEN_RE.search(str(value)))
+    return False
+
+
 def queryToCache(cacheKey,
                  fn,
                  args=(),
@@ -1024,6 +1044,10 @@ def queryToCache(cacheKey,
 
     # --- WRITE TO CACHE ---
     if gotResults:
+        if _contains_garbage_tokens(result):
+            print(f"[queryToCache] garbage token(s) detected in model response "
+                  f"for key {cacheKey!r:.80s} - discarding, not caching")
+            return None
         cacheSet(queryHash, cacheKey, result)
 
     return result
