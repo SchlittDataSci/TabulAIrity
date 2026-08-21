@@ -334,9 +334,10 @@ HTML_PAGE = r"""<!DOCTYPE html>
   #tooltip .tt-meta{color:#7aa0c6;font-size:10px;margin-bottom:6px}
   #tooltip .tt-body{white-space:pre-wrap;word-break:break-word;max-height:180px;overflow:auto;color:#cfe0f5}
   #tooltip .tt-row{margin:2px 0}
-  #popupOverlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:30;align-items:center;justify-content:center}
-  #popupOverlay.open{display:flex}
-  #popup{width:min(820px,92vw);max-height:88vh;overflow:auto;background:#0f1419;border:1px solid #2a3a4d;border-radius:12px;box-shadow:0 16px 48px rgba(0,0,0,.6);padding:16px}
+  #popupOverlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:30;align-items:center;justify-content:center;opacity:0;transition:opacity .18s ease-out}
+  #popupOverlay.open{display:flex;opacity:1}
+  #popup{width:min(820px,92vw);max-height:88vh;overflow:auto;background:#0f1419;border:1px solid #2a3a4d;border-radius:12px;box-shadow:0 16px 48px rgba(0,0,0,.6);padding:16px;scroll-behavior:smooth;transform:translateY(8px) scale(.98);transition:transform .18s ease-out}
+  #popupOverlay.open #popup{transform:translateY(0) scale(1)}
   #popup h3{margin:0 0 8px;color:#9ec5ff;font-size:14px}
   #popup .popup-meta{color:#7aa0c6;font-size:11px;margin-bottom:10px}
   #popup .popup-section{margin:10px 0}
@@ -347,8 +348,11 @@ HTML_PAGE = r"""<!DOCTYPE html>
   #side{flex:0 0 420px;width:420px;min-width:320px;max-width:520px;border-left:1px solid #2a3a4d;background:#0f1419;display:flex;flex-direction:column;min-height:0;overflow:hidden;height:100%}
   #sideHead{padding:10px 12px;border-bottom:1px solid #1e2d44;font-size:12px;color:#9fb4cc;display:flex;align-items:center;justify-content:space-between;flex-shrink:0}
   #sideHead .count{font-variant-numeric:tabular-nums;color:#7aa0c6}
-  #panel{flex:1 1 auto;overflow-y:auto;overflow-x:hidden;padding:8px 10px;display:flex;flex-direction:column;gap:8px;min-height:0;align-items:stretch}
-  .entry{border:1px solid #1e2d44;border-radius:8px;overflow:hidden;background:#111a26;flex-shrink:0}
+  #panel{flex:1 1 auto;overflow-y:auto;overflow-x:hidden;padding:8px 10px;display:flex;flex-direction:column;gap:8px;min-height:0;align-items:stretch;scroll-behavior:smooth}
+  .entry{border:1px solid #1e2d44;border-radius:8px;overflow:hidden;background:#111a26;flex-shrink:0;padding:2px;transition:border-color .12s ease-out,background .12s ease-out,transform .08s ease-out}
+  .entry[data-clickable="1"]{cursor:pointer}
+  .entry[data-clickable="1"]:hover{border-color:#3a7bd5;background:#152238}
+  .entry[data-clickable="1"]:active{transform:translateY(1px)}
   .entryHead{padding:6px 8px;font-size:11px;font-weight:600;letter-spacing:.03em;background:#132034;border-bottom:1px solid #1e2d44;display:flex;justify-content:space-between;color:#9ec5ff}
   .entryHead .cid{font-weight:400;color:#7aa0c6}
   .promptBox,.respBox{padding:7px 8px;font-size:11.5px;line-height:1.45;white-space:pre-wrap;word-break:break-word;max-height:120px;overflow:auto}
@@ -400,9 +404,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
     <div id="panel"><div class="empty">No prompts yet. Run a chatNet with <code>walkChatNet</code> or <code>askChatQuestion</code>.</div></div>
   </div>
 </div>
-<div id="popupOverlay" onclick="if(event.target===this) closePopup()"><div id="popup"><button class="closeBtn" onclick="closePopup()">✕ Close</button><h3 id="popupTitle"></h3><div id="popupMeta" class="popup-meta"></div><div class="popup-section"><div class="popup-label">PROMPT (full)</div><pre id="popupPrompt"></pre></div><div class="popup-section"><div class="popup-label">SYSTEM PROMPT (persona)</div><pre id="popupPersona"></pre></div><div class="popup-section"><div class="popup-label">RESPONSE (raw)</div><pre id="popupContext"></pre></div></div></div>
+<div id="popupOverlay" onclick="if(event.target===this) closePopup()"><div id="popup"><button class="closeBtn" onclick="closePopup()">✕ Close</button><h3 id="popupTitle"></h3><div id="popupMeta" class="popup-meta"></div><div class="popup-section"><div class="popup-label">SYSTEM PROMPT (persona)</div><pre id="popupPersona"></pre></div><div class="popup-section"><div class="popup-label">INPUT PROMPT</div><pre id="popupPrompt"></pre></div><div class="popup-section"><div class="popup-label">OUTPUT (response)</div><pre id="popupContext"></pre></div></div></div>
 <script>
-const MAX_PANEL = 20;
+const MAX_PANEL = 50;
 const ANIM_DELAY = 2000; // per-chatnet
 
 function dbg(msg, isError=false){
@@ -591,8 +595,28 @@ function makeSim(){
     )
     .force("collision",
       d3.forceCollide()
-        .radius(32)
+        .radius(d => nodeRadius(d) + 10)
         .strength(0.8)
+    )
+    // Per-chatnet clustering: pull every node toward its own chatnet's
+    // assigned ring center. Without this, disconnected chatnets have
+    // nothing tying them to the layout — link+charge alone let clusters
+    // drift wherever the initial jitter throws them, and re-adding a
+    // chatnet later doesn't pull the existing ones back into place.
+    // Function accessors so a chatnet whose center gets recomputed by
+    // ensureChatnet (e.g. after a new chatnet arrives and the ring is
+    // re-spaced) is followed live, without needing to rebuild forces.
+    .force("clusterX",
+      d3.forceX(d => {
+        const ch = chatnets.get(String(d.chatnet_id));
+        return ch ? ch.center.x : width/2;
+      }).strength(0.08)
+    )
+    .force("clusterY",
+      d3.forceY(d => {
+        const ch = chatnets.get(String(d.chatnet_id));
+        return ch ? ch.center.y : height/2;
+      }).strength(0.08)
     )
     .alphaDecay(0.0228)   // back to d3 default — was cooling the sim before it could spread out
     .velocityDecay(0.45)  // back near d3 default — was over-damping every tick
@@ -620,10 +644,34 @@ function ticked(){
   gNodeLabels.selectAll("text")
     .attr("x",d=>d.x).attr("y",d=>d.y + 4);
 
-  // chatnet title hulls/badges — update positions
-  gWrap.selectAll("text.chatnetTitle")
-    .attr("x",d=>d.center.x).attr("y",d=>d.center.y - (Math.min(width,height)*0.28) - 18);
+  // chatnet title badges — position from the LIVE cluster centroid, not
+  // the assigned ring slot, so dragging nodes carries the label with them.
+  // One pass over nodes tallies each chatnet's centroid and topmost y;
+  // the label sits horizontally at the centroid, vertically just above
+  // the highest node so it always clears the cluster.
+  const centroids = new Map();
+  for (const n of nodes){
+    const cid = String(n.chatnet_id);
+    let c = centroids.get(cid);
+    if (!c){ c = {sx:0, sy:0, top:Infinity, count:0}; centroids.set(cid, c); }
+    c.sx += n.x; c.sy += n.y; c.count++;
+    if (n.y < c.top) c.top = n.y;
+  }
+  gWrap.selectAll("g.chatnetTitle")
+    .attr("transform", d=>{
+      const c = centroids.get(String(d.id));
+      if (c && c.count > 0) return `translate(${c.sx/c.count},${c.top - 28})`;
+      // no nodes yet for this chatnet — fall back to its ring slot
+      return `translate(${d.center.x},${d.center.y - 90})`;
+    });
 }
+
+// Refreshed once per updateGraph() call: the set of chatnet_ids that
+// currently have at least one queued or processing node. colorForNode uses
+// it to decide whether "completed" should still glow green (chatnet is
+// mid-run and this is genuine progress) or fade back to the chatnet's
+// base color (chatnet has settled; green would just be stale).
+let activeChatnets = new Set();
 
 function colorForNode(d){
   const ch = chatnets.get(String(d.chatnet_id));
@@ -631,8 +679,12 @@ function colorForNode(d){
   switch(d.state){
     case "queued": return "#f5c842";
     case "processing": return "#ff8c42";
-    case "completed": return "#2ecc71";
     case "error": return "#ff4d4d";
+    case "completed":
+      // Only stays green while the chatnet is actively running. Once
+      // everything settles, revert to base so an idle chatnet doesn't
+      // look identical to one still finishing up.
+      return activeChatnets.has(String(d.chatnet_id)) ? "#2ecc71" : base;
     default: return base;
   }
 }
@@ -641,6 +693,14 @@ function colorForEdge(d){
   if(d.state==="false") return "#ff4d4d";
   return "#8a8f98";
 }
+
+// Start nodes are the entry points of each chatnet. They get a larger
+// radius and a brightened fill so the eye finds them immediately when
+// scanning any subgraph. Everything downstream (collision, drawing, and
+// anything future that cares about node geometry) reads from nodeRadius()
+// so a change here propagates in one place.
+function isStart(d){ return String(d.label||"").toLowerCase() === "start"; }
+function nodeRadius(d){ return isStart(d) ? 30 : 22; }
 
 function renderFallbackList(){
   // shown when D3 missing — render node/edge list as HTML
@@ -669,6 +729,16 @@ function updateGraph(isStructural=false){
     document.getElementById("graphPill").textContent = `${chatnets.size} chatNets`;
     return;
   }
+  // Refresh the active-chatnets set that colorForNode reads for its
+  // completed-node fallback. Recomputed here (not lazily inside
+  // colorForNode) so it's an O(nodes) pass once per render, not O(nodes²)
+  // across every per-node color lookup.
+  activeChatnets = new Set();
+  for(const nd of nodes){
+    if(nd.state === "queued" || nd.state === "processing"){
+      activeChatnets.add(String(nd.chatnet_id));
+    }
+  }
   // data joins
   const link = gEdges.selectAll("line").data(edges, d=>d.id);
   link.enter().append("line")
@@ -694,7 +764,7 @@ function updateGraph(isStructural=false){
 
   const n = gNodes.selectAll("circle").data(nodes, d=>d.id);
   const nEnter = n.enter().append("circle")
-    .attr("r",22).attr("stroke","#0f1419").attr("stroke-width",1.5)
+    .attr("r", d => nodeRadius(d)).attr("stroke","#0f1419").attr("stroke-width",1.5)
     .style("cursor","grab")
     .on("mousemove", (evt,d)=>{ showTip(nodeTip(d), evt); })
     .on("mouseenter", (evt,d)=>{ showTip(nodeTip(d), evt); })
@@ -718,14 +788,19 @@ function updateGraph(isStructural=false){
       if(d.state==="processing") return 1;
       return 0.92;
     })
+    .attr("r", d => nodeRadius(d))
     .classed("flash", d=> d._flash)
     .style("filter", d=>{
       const base = colorForNode(d);
-      if(d.state==="processing") return "drop-shadow(0 0 10px rgba(255,140,66,.95)) drop-shadow(0 0 18px rgba(255,140,66,.45))";
-      if(d.state==="queued") return "drop-shadow(0 0 9px rgba(245,200,66,.9)) drop-shadow(0 0 16px rgba(245,200,66,.5))";
-      if(d.state==="completed") return `drop-shadow(0 0 7px ${base}99) drop-shadow(0 0 14px ${base}55)`;
-      if(d.state==="error") return "drop-shadow(0 0 8px rgba(255,77,77,.7))";
-      return `drop-shadow(0 0 8px ${base}CC) drop-shadow(0 0 16px ${base}66)`;
+      // Start nodes get a brightness lift on top of whatever state glow
+      // the node currently carries, so they read as "entry point" at any
+      // state without having to invent a Start-specific palette.
+      const startBoost = isStart(d) ? "brightness(1.2) saturate(1.1) " : "";
+      if(d.state==="processing") return startBoost + "drop-shadow(0 0 10px rgba(255,140,66,.95)) drop-shadow(0 0 18px rgba(255,140,66,.45))";
+      if(d.state==="queued") return startBoost + "drop-shadow(0 0 9px rgba(245,200,66,.9)) drop-shadow(0 0 16px rgba(245,200,66,.5))";
+      if(d.state==="completed") return startBoost + `drop-shadow(0 0 7px ${base}99) drop-shadow(0 0 14px ${base}55)`;
+      if(d.state==="error") return startBoost + "drop-shadow(0 0 8px rgba(255,77,77,.7))";
+      return startBoost + `drop-shadow(0 0 8px ${base}CC) drop-shadow(0 0 16px ${base}66)`;
     });
   n.exit().remove();
 
@@ -735,13 +810,32 @@ function updateGraph(isStructural=false){
     .merge(nl).text(d=>d.label);
   nl.exit().remove();
 
-  // chatnet titles (one per chatnet) — render as badges near center
+  // chatnet titles — a colored pill badge per chatnet, positioned each
+  // tick from the LIVE centroid of its nodes (see ticked()) so dragging
+  // a cluster carries its label with it. The rect auto-sizes to the
+  // text bbox on every render so async LLM-generated titles fit cleanly
+  // when they arrive later.
   const titles = [...chatnets.entries()].map(([id,ch])=> ({id, ...ch}));
-  const tSel = gWrap.selectAll("text.chatnetTitle").data(titles, d=>d.id);
-  tSel.enter().append("text").attr("class","chatnetTitle")
-    .attr("text-anchor","middle").attr("font-size","11px").attr("font-weight","700").attr("fill","#9ec5ff")
-    .attr("paint-order","stroke").attr("stroke","#0f1419").attr("stroke-width",3)
-    .merge(tSel).text(d=> d.title);
+  const tSel = gWrap.selectAll("g.chatnetTitle").data(titles, d=>d.id);
+  const tEnter = tSel.enter().append("g").attr("class","chatnetTitle")
+    .attr("pointer-events","none");
+  tEnter.append("rect").attr("class","titleBg").attr("rx",6).attr("ry",6);
+  tEnter.append("text")
+    .attr("text-anchor","middle").attr("dy","0.35em")
+    .attr("font-size","11px").attr("font-weight","700")
+    .attr("paint-order","stroke").attr("stroke","#0b1220").attr("stroke-width",2);
+  tEnter.merge(tSel).each(function(d){
+    const g = d3.select(this);
+    g.select("text").attr("fill", d.color).text(d.title);
+    const bbox = g.select("text").node().getBBox();
+    const padX = 10, padY = 4;
+    g.select("rect")
+      .attr("fill", d.color).attr("fill-opacity", 0.14)
+      .attr("stroke", d.color).attr("stroke-opacity", 0.55)
+      .attr("stroke-width", 1)
+      .attr("x", bbox.x - padX).attr("y", bbox.y - padY)
+      .attr("width", bbox.width + padX*2).attr("height", bbox.height + padY*2);
+  });
   tSel.exit().remove();
 
   document.getElementById("nodePill").textContent = `${nodes.length} nodes`;
@@ -772,7 +866,17 @@ function openPopupFor(cid, nodeId){
   document.getElementById('popupPrompt').textContent = d.fullPrompt || d.prompt || '';
   document.getElementById('popupPersona').textContent = d.persona || '(no system prompt)';
   document.getElementById('popupContext').textContent = d.response || '';
-  document.getElementById('popupOverlay').classList.add('open');
+  const popup = document.getElementById('popup');
+  const overlay = document.getElementById('popupOverlay');
+  // Jump to top instantly BEFORE the fade-in so reopening on a different
+  // node doesn't briefly flash the previous node's scroll position, then
+  // rely on the CSS `scroll-behavior: smooth` for any subsequent scroll.
+  popup.scrollTo({top: 0, behavior: 'instant'});
+  overlay.classList.add('open');
+  // Reset each pre section's own scroll too — same reason.
+  ['popupPersona','popupPrompt','popupContext'].forEach(id=>{
+    document.getElementById(id).scrollTo({top: 0, behavior: 'instant'});
+  });
 }
 function closePopup(){ document.getElementById('popupOverlay').classList.remove('open'); }
 document.addEventListener('keydown', e=>{ if(e.key==='Escape') closePopup(); });
@@ -783,6 +887,7 @@ function addPanelEntry(cid, nodeId, prompt, response, cleaned, extra={}){
   popupStore.set(key, {prompt, response, cleaned, persona: extra.persona||'', fx: extra.fx||'', state: extra.state||'completed', fullPrompt: extra.fullPrompt||prompt});
   const div = document.createElement("div");
   div.className="entry";
+  div.dataset.clickable="1";
   div.style.cursor='pointer';
   div.title='Click for full prompt / system prompt / context';
   div.onclick = ()=> openPopupFor(cid, nodeId);
