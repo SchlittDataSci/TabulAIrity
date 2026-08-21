@@ -11,7 +11,7 @@ Rather than relying on single-shot prompts, TabulAIrity constructs directed grap
 * **Aggressive Caching:** Implements local file-based caching for LLM queries and web scraping to minimize latency and API costs during development and regression testing.
 * **Automated Self-Improvement:** Includes an iterative optimization engine that refines prompts against ground-truth datasets to maximize extraction accuracy.
 * **Integrated ETL Tools:** Built-in support for Google Sheets I/O, RSS feed ingestion, and automated translation.
-* **Live Force-Directed Visualization (v1.3.1):** Optional real-time browser viz (`vizOn()`/`vizOff()`) showing the CDEN as an interactive D3.js force graph + streaming prompt/response panel — no new Python deps, works offline via vendored `d3.v7.min.js`.
+* **Live Force-Directed Visualization (v1.3.2):** Optional real-time browser viz (`vizOn()`/`vizOff()`) showing the CDEN as an interactive D3.js force graph + streaming prompt/response panel — no new Python deps, works offline via vendored `d3.v7.min.js`.
 
 ## Modules
 
@@ -36,7 +36,7 @@ I/O utilities for external data sources.
 Lightweight web scraping utilities.
 * **Text Extraction:** Fetches URLs and utilizes `BeautifulSoup` to strip boilerplate (scripts, styles, nav) and return clean, sentence-structured text for LLM consumption.
 
-### `visualization.py` (Live Viz — v1.3.1)
+### `visualization.py` (Live Viz — v1.3.2)
 Zero-dependency (stdlib `http.server` + `threading`) live visualization. Default **OFF** — call `tb.vizOn()` after `import tabulairity` to start a local SSE server that streams graph events to a D3 v7 force-directed graph (vendored at `src/tabulairity/static/d3.v7.min.js` with CDN fallback).
 
 * **Force graph:** per-chatNet colors, `idle`/`queued` (flash) /`processing` (glow) /`completed`/`error` nodes + `idle`/`true` (blue) /`false` (red/dashed) edges, collision + charge + link forces. Drag nodes to reposition (pinned on drag, double-click to release), scroll to zoom, drag background to pan.
@@ -79,7 +79,7 @@ PostgreSQL `cache` table when `psycopg2` is installed and configured) to store
 MD5-hashed responses for every LLM query and scrape request. Clear/delete the
 database to force fresh execution.
 
-## Live Visualization — Quick Start (v1.3.1)
+## Live Visualization — Quick Start (v1.3.2)
 
 ```python
 import tabulairity as tb
