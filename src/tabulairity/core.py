@@ -1215,11 +1215,15 @@ def cachePage(url, maxLen = 100000):
     return result
 
 
-_geocoder = Nominatim(user_agent="tabulairity")
+_geocoder = Nominatim(
+    user_agent="tabulairity",
+    timeout=10
+)
 
 
 def _geocodeCoordinates(locText):
     """Geocode text and return only JSON-serializable coordinates."""
+    sleep(1)
     location = _geocoder.geocode(locText)
 
     if location is None or location.point is None:
@@ -1234,20 +1238,25 @@ def cacheGeocode(locText):
     Nominatim returns a geopy Location object, but the generic cache stores
     results as JSON. Convert the Location to the historical [lat, lon]
     representation before it enters the cache.
+
+    Failed requests are retried by queryToCache() with a 5-second delay
+    between attempts.
     """
     if locText is None or pd.isna(locText) or str(locText).strip() == "":
         return None
 
     safeLoc = repr(locText)
-    # Use a new namespace so historical OSMnx coordinate lists cannot be
-    # returned as though they were geopy Location objects.
+
+    # Use a new namespace so historical OSMnx coordinate lists cannot
+    # be returned as though they were geopy Location objects.
     cacheKey = f"geopy.nominatim.geocode({safeLoc})"
 
     try:
         return queryToCache(
             cacheKey,
             _geocodeCoordinates,
-            args=(locText,)
+            args=(locText,),
+            tolerant=True
         )
     except Exception as e:
         print(f"[Geocode] Failed on {locText}: {e}")
