@@ -1219,7 +1219,12 @@ _geocoder = Nominatim(user_agent="tabulairity")
 
 
 def _geocodeCoordinates(locText):
-    """Geocode text and return only JSON-serializable coordinates."""
+    """Geocode text and return only JSON-serializable coordinates.
+
+    New Nominatim queries are rate-limited to 1 req/s per usage policy;
+    cached lookups bypass this via queryToCache and incur no delay.
+    """
+    sleep(1)
     location = _geocoder.geocode(locText)
 
     if location is None or location.point is None:
