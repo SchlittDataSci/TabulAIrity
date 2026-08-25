@@ -169,12 +169,40 @@ def _generate_title_sync(G, chatnet_id: int) -> str:
 # Public hooks called from core.py
 # ---------------------------------------------------------------------------
 
-def viz_notify_graph_load(G) -> int:
+def viz_notify_graph_load(G, chatnet=None) -> int:
     """Called from core.buildChatNet after G is built. Returns chatnet_id."""
     if not _viz_enabled:
         return _get_or_create_chatnet_id(G)
+
     try:
-        cid = _get_or_create_chatnet_id(G)
+        # Deduplicate visualization initialization by ChatNet definition.
+        if chatnet is not None:
+            chatnet_hash = _chatnet_hash(chatnet)
+
+            with _viz_lock:
+                cid = _chatnet_hashes.get(chatnet_hash)
+
+                if cid is None:
+                    cid = _next_chatnet_id
+                    globals()["_next_chatnet_id"] += 1
+                    _chatnet_hashes[chatnet_hash] = cid
+                    is_new = True
+                else:
+                    is_new = False
+
+            # Always attach the existing ID to this execution's graph.
+            G.graph["viz_id"] = cid
+
+            # Same ChatNet already exists in the visualization.
+            # Do not initialize/render it again.
+            if not is_new:
+                return cid
+
+        else:
+            # Backwards-compatible path for callers that don't provide
+            # the source DataFrame.
+            cid = _get_or_create_chatnet_id(G)
+
         title = _generate_title_sync(G, cid)
 
         nodes = []

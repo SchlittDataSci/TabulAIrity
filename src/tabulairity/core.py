@@ -1393,7 +1393,7 @@ def askChatQuestion(prompt,
                     extra_params=None):
     """Ask a question to the chat model"""
     # viz: standalone prompt (outside walkChatNet the cid will be None, still emit for side panel)
-    if _viz_enabled:
+    if _viz_enabled and _viz_cid is None:
         try:
             from .visualization import viz_notify_standalone_prompt
             viz_notify_standalone_prompt(str(prompt)[:500], str(persona)[:200], str(model))
@@ -1418,7 +1418,7 @@ def askChatQuestion(prompt,
         kwargs={'temperature': temperature, 'seed': seed, 'timeout': 600, 'extra_params': extra_params},
         tolerant=False,
     )
-    if _viz_enabled:
+    if _viz_enabled and _viz_cid is None:
         try:
             from .visualization import viz_notify_standalone_response
             viz_notify_standalone_response(str(prompt)[:500], str(result)[:500])
