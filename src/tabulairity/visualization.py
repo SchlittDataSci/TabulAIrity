@@ -48,6 +48,31 @@ _EVENT_LOG_MAX = 200
 # Mapping from id(G) -> chatnet_id for graphs that haven't stored it in G.graph
 _graph_id_map: dict[int, int] = {}
 
+# Deduplication for cyclical reads — hash ChatNet definition to avoid double-render
+_chatnet_hashes: dict[str, int] = {}
+
+
+def _chatnet_hash(chatnet) -> str:
+    """Hash ChatNet DataFrame/definition for viz deduplication."""
+    try:
+        import hashlib
+
+        # Try pandas-aware hash for DataFrames (deterministic)
+        try:
+            import pandas as pd  # type: ignore
+
+            if isinstance(chatnet, pd.DataFrame):
+                # hash_pandas_object is stable across runs for same content
+                base = pd.util.hash_pandas_object(chatnet, index=True).values.tobytes()
+                # mix shape/columns to avoid collisions on empty frames
+                extra = f"{chatnet.shape}{list(chatnet.columns)}".encode()
+                return hashlib.md5(base + extra).hexdigest()
+        except Exception:
+            pass
+        return hashlib.md5(str(chatnet).encode()).hexdigest()
+    except Exception:
+        return str(id(chatnet))
+
 # ---------------------------------------------------------------------------
 # Low-level emit / helpers
 # ---------------------------------------------------------------------------
