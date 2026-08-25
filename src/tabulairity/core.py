@@ -31,6 +31,7 @@ import sys
 # Core checks this cheaply before attempting any viz work.
 # ---------------------------------------------------------------------------
 _viz_enabled = False
+_viz_walk_active = 0  # depth counter: >0 when inside walkChatNet/Async, used to suppress duplicate standalone viz
 
 
 def _viz_emit(event_type: str, payload: dict):
@@ -911,81 +912,86 @@ async def walkChatNetAsync(G, fxStore, varStore, verbosity, numWorkers=4, tolera
             viz_notify_node_queued(_viz_cid, 'Start')
         except Exception:
             pass
-    if isinstance(varStore, pd.Series):
-        chatVars = varStore.to_dict()
-    else:
-        chatVars = dict(varStore) if varStore is not None else {}
-    fxStore = fxStore | baseFx
-    semaphore = asyncio.Semaphore(numWorkers)
-    
-    currentWave = ['Start']
-    waveNumber = 0
-    errors = []
-    stopped = False
-
+    global _viz_walk_active
+    _viz_walk_active += 1
     try:
-        while currentWave:
-            waveNumber += 1
-            if verbosity > 0:
-                if len(currentWave) <= 10:
-                    print(f"\n[Wave {waveNumber}] Processing {len(currentWave)} nodes: {currentWave}")
-                else:
-                    print(f"\n[Wave {waveNumber}] Processing {len(currentWave)} nodes: {currentWave[:10]} ... and {len(currentWave) - 10} more")
-            
-            # Create tasks for all nodes in current wave
-            tasks = []
-            for idx, node in enumerate(currentWave):
-                task = asyncio.create_task(
-                    process_one_node(node, G, chatVars, fxStore, verbosity, semaphore, workerID=idx % numWorkers)
-                )
-                tasks.append((node, task))
-            
-            # Wait for ALL nodes in this wave to complete
-            nextWave = []
-            for node, task in tasks:
-                childNodes, nodeErrors = await task
-                if nodeErrors:
-                    errors.extend(nodeErrors)
-                    if not tolerant:
-                        stopped = True
-                        continue  # don't chain children of a failed node
-                nextWave.extend(childNodes)
-
-            if stopped:
-                if verbosity > 0:
-                    print(f"\n[STOPPED] Wave {waveNumber} hit an error; halting before the next wave (tolerant=False)")
-                break
-
-            # Remove duplicates, sort for next wave
-            currentWave = sorted(set(nextWave), reverse=True)
-            # viz: queued for next wave
-            if _viz_enabled and _viz_cid is not None and currentWave:
-                try:
-                    from .visualization import viz_notify_node_queued
-                    for _n in currentWave:
-                        viz_notify_node_queued(_viz_cid, _n)
-                except Exception:
-                    pass
+        if isinstance(varStore, pd.Series):
+            chatVars = varStore.to_dict()
+        else:
+            chatVars = dict(varStore) if varStore is not None else {}
+        fxStore = fxStore | baseFx
+        semaphore = asyncio.Semaphore(numWorkers)
         
-        if verbosity > 0:
-            print(f"\n[Complete] Processed {waveNumber} waves")
-    
-    except KeyboardInterrupt:
-        print("\n[!] Execution interrupted by user.")
-        errors.append({'walkChatNet': 'Execution interrupted by user (KeyboardInterrupt)', 'type': 'node'})
-        chatVars['success'] = False
-        chatVars['errors'] = errors
-        raise
+        currentWave = ['Start']
+        waveNumber = 0
+        errors = []
+        stopped = False
 
-    chatVars['success'] = len(errors) == 0
-    chatVars['errors'] = errors
-    if _viz_enabled and _viz_cid is not None:
         try:
-            from .visualization import viz_notify_chatnet_complete
-            viz_notify_chatnet_complete(_viz_cid, chatVars['success'])
-        except Exception:
-            pass
-    return chatVars
+            while currentWave:
+                waveNumber += 1
+                if verbosity > 0:
+                    if len(currentWave) <= 10:
+                        print(f"\n[Wave {waveNumber}] Processing {len(currentWave)} nodes: {currentWave}")
+                    else:
+                        print(f"\n[Wave {waveNumber}] Processing {len(currentWave)} nodes: {currentWave[:10]} ... and {len(currentWave) - 10} more")
+                
+                # Create tasks for all nodes in current wave
+                tasks = []
+                for idx, node in enumerate(currentWave):
+                    task = asyncio.create_task(
+                        process_one_node(node, G, chatVars, fxStore, verbosity, semaphore, workerID=idx % numWorkers)
+                    )
+                    tasks.append((node, task))
+                
+                # Wait for ALL nodes in this wave to complete
+                nextWave = []
+                for node, task in tasks:
+                    childNodes, nodeErrors = await task
+                    if nodeErrors:
+                        errors.extend(nodeErrors)
+                        if not tolerant:
+                            stopped = True
+                            continue  # don't chain children of a failed node
+                    nextWave.extend(childNodes)
+
+                if stopped:
+                    if verbosity > 0:
+                        print(f"\n[STOPPED] Wave {waveNumber} hit an error; halting before the next wave (tolerant=False)")
+                    break
+
+                # Remove duplicates, sort for next wave
+                currentWave = sorted(set(nextWave), reverse=True)
+                # viz: queued for next wave
+                if _viz_enabled and _viz_cid is not None and currentWave:
+                    try:
+                        from .visualization import viz_notify_node_queued
+                        for _n in currentWave:
+                            viz_notify_node_queued(_viz_cid, _n)
+                    except Exception:
+                        pass
+            
+            if verbosity > 0:
+                print(f"\n[Complete] Processed {waveNumber} waves")
+        
+        except KeyboardInterrupt:
+            print("\n[!] Execution interrupted by user.")
+            errors.append({'walkChatNet': 'Execution interrupted by user (KeyboardInterrupt)', 'type': 'node'})
+            chatVars['success'] = False
+            chatVars['errors'] = errors
+            raise
+
+        chatVars['success'] = len(errors) == 0
+        chatVars['errors'] = errors
+        if _viz_enabled and _viz_cid is not None:
+            try:
+                from .visualization import viz_notify_chatnet_complete
+                viz_notify_chatnet_complete(_viz_cid, chatVars['success'])
+            except Exception:
+                pass
+        return chatVars
+    finally:
+        _viz_walk_active -= 1
 
 
 def walkChatNet(G,
@@ -1038,56 +1044,61 @@ def walkChatNet(G,
                 return result
         else:
             # Synchronous execution
-            _viz_cid = _viz_cid_for_graph(G) if _viz_enabled else None
-            # If viz was enabled after G was built, G may have no viz_id yet — allocate now
-            if _viz_enabled and _viz_cid is None:
-                try:
-                    from .visualization import viz_notify_graph_load
-                    _viz_cid = viz_notify_graph_load(G)
-                except Exception:
-                    pass
-            toAsk = ['Start']
-            fxStore = fxStore | baseFx
-            chatVars = deepcopy(varStore)
-            errors = []
-
-            # viz: initial queued
-            if _viz_enabled and _viz_cid is not None:
-                try:
-                    from .visualization import viz_notify_node_queued
-                    viz_notify_node_queued(_viz_cid, 'Start')
-                except Exception:
-                    pass
-
-            while toAsk != []:
-                nextQ = toAsk.pop()
-                nextNodes, nodeErrors = processNodeStep(nextQ, G, chatVars, fxStore, verbosity)
-                if nodeErrors:
-                    errors.extend(nodeErrors)
-                    if not tolerant:
-                        if verbosity > 0:
-                            print(f"\n[STOPPED] Error hit on '{nextQ}'; halting traversal (tolerant=False)")
-                        break
-                # viz: nodes queued
-                if _viz_enabled and _viz_cid is not None and nextNodes:
+            global _viz_walk_active
+            _viz_walk_active += 1
+            try:
+                _viz_cid = _viz_cid_for_graph(G) if _viz_enabled else None
+                # If viz was enabled after G was built, G may have no viz_id yet — allocate now
+                if _viz_enabled and _viz_cid is None:
                     try:
-                        from .visualization import viz_notify_node_queued
-                        for _n in nextNodes:
-                            viz_notify_node_queued(_viz_cid, _n)
+                        from .visualization import viz_notify_graph_load
+                        _viz_cid = viz_notify_graph_load(G)
                     except Exception:
                         pass
-                toAsk += nextNodes
+                toAsk = ['Start']
+                fxStore = fxStore | baseFx
+                chatVars = deepcopy(varStore)
+                errors = []
 
-            chatVars['success'] = len(errors) == 0
-            chatVars['errors'] = errors
-            # viz: chatnet complete + reset (frontend schedules reset after delay, but emit both)
-            if _viz_enabled and _viz_cid is not None:
-                try:
-                    from .visualization import viz_notify_chatnet_complete
-                    viz_notify_chatnet_complete(_viz_cid, chatVars['success'])
-                except Exception:
-                    pass
-            return chatVars
+                # viz: initial queued
+                if _viz_enabled and _viz_cid is not None:
+                    try:
+                        from .visualization import viz_notify_node_queued
+                        viz_notify_node_queued(_viz_cid, 'Start')
+                    except Exception:
+                        pass
+
+                while toAsk != []:
+                    nextQ = toAsk.pop()
+                    nextNodes, nodeErrors = processNodeStep(nextQ, G, chatVars, fxStore, verbosity)
+                    if nodeErrors:
+                        errors.extend(nodeErrors)
+                        if not tolerant:
+                            if verbosity > 0:
+                                print(f"\n[STOPPED] Error hit on '{nextQ}'; halting traversal (tolerant=False)")
+                            break
+                    # viz: nodes queued
+                    if _viz_enabled and _viz_cid is not None and nextNodes:
+                        try:
+                            from .visualization import viz_notify_node_queued
+                            for _n in nextNodes:
+                                viz_notify_node_queued(_viz_cid, _n)
+                        except Exception:
+                            pass
+                    toAsk += nextNodes
+
+                chatVars['success'] = len(errors) == 0
+                chatVars['errors'] = errors
+                # viz: chatnet complete + reset (frontend schedules reset after delay, but emit both)
+                if _viz_enabled and _viz_cid is not None:
+                    try:
+                        from .visualization import viz_notify_chatnet_complete
+                        viz_notify_chatnet_complete(_viz_cid, chatVars['success'])
+                    except Exception:
+                        pass
+                return chatVars
+            finally:
+                _viz_walk_active -= 1
 
     except KeyboardInterrupt:
         print("\n[!] Execution interrupted by user.")
@@ -1392,8 +1403,8 @@ def askChatQuestion(prompt,
                     seed=None,
                     extra_params=None):
     """Ask a question to the chat model"""
-    # viz: standalone prompt (outside walkChatNet) — emit for side panel when viz is on
-    if _viz_enabled:
+    # viz: standalone prompt — emit only when NOT inside walkChatNet to avoid double right-panel entries
+    if _viz_enabled and _viz_walk_active == 0:
         try:
             from .visualization import viz_notify_standalone_prompt
             viz_notify_standalone_prompt(str(prompt)[:500], str(persona)[:200], str(model))
@@ -1418,7 +1429,7 @@ def askChatQuestion(prompt,
         kwargs={'temperature': temperature, 'seed': seed, 'timeout': 600, 'extra_params': extra_params},
         tolerant=False,
     )
-    if _viz_enabled:
+    if _viz_enabled and _viz_walk_active == 0:
         try:
             from .visualization import viz_notify_standalone_response
             viz_notify_standalone_response(str(prompt)[:500], str(result)[:500])
