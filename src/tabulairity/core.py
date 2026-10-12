@@ -389,6 +389,9 @@ promptDelay = 0.0
 promptTimeout = 1200
 targetLanguage = 'en'
 translationModel = "gemma3:27b"
+getYNModel = "gemma3:12b"
+translationExtraParams = None
+getYNExtraParams = None
 
 
 def getPromptTimeout(timeout=None):
@@ -1614,7 +1617,12 @@ def queryToCache(cacheKey,
     if useCache:
         cached = cacheGet(queryHash)
         if cached is not None:
-            return cached
+            # Never replay cached empty model responses from earlier versions.
+            if cacheKey.startswith(('getChatContent(', 'getYN(')) and (
+                    not isinstance(cached, str) or not cached.strip()):
+                print('[Cache] Ignoring empty cached inference')
+            else:
+                return cached
 
     # --- EXECUTE QUERY ---
     sleep(promptDelay)
@@ -1737,7 +1745,8 @@ def translateOne(text):
     translation = askChatQuestion(translationPrompt,
                                   translationPersona,
                                   tokens=maxTranslateTokens,
-                                  model=translationModel)
+                                  model=translationModel,
+                                  extra_params=translationExtraParams)
     return translation
 
 
@@ -1812,7 +1821,17 @@ def getChatContent(messages,
     """Get completion from LLM with timeout - FAIL FAST on errors"""
     timeout = getPromptTimeout(timeout)
     modelRoute, ip, apiKey = getModelRoute(modelName)
-    
+
+    # CDEN extra_params and standalone calls use the same LiteLLM interface.
+    # Move standard LiteLLM parameters out of extra_body rather than sending
+    # incompatible provider-native fields alongside them.
+    provider_params = dict(extra_params or {})
+    reasoning_effort = provider_params.pop('reasoning_effort', None)
+    if provider_params.get('reasoning') == 'off':
+        provider_params.pop('reasoning')
+        if reasoning_effort is None:
+            reasoning_effort = 'none'
+
     try:
         content = completion(
             model=modelRoute,
@@ -1823,9 +1842,18 @@ def getChatContent(messages,
             seed=seed,
             temperature=temperature,
             timeout=timeout,
-            **({"extra_body": extra_params} if extra_params else {})
+            **({'reasoning_effort': reasoning_effort,
+                'allowed_openai_params': ['reasoning_effort']}
+               if reasoning_effort is not None else {}),
+            **({'extra_body': provider_params} if provider_params else {})
         )
-        cleaned = content.choices[0].message.content.strip() if content.choices[0].message.content else ''
+        choice = content.choices[0]
+        cleaned = (choice.message.content or '').strip()
+        if not cleaned:
+            raise ValueError(
+                f"Model {modelName!r} returned empty content "
+                f"(finish_reason={choice.finish_reason!r}); inference not cached"
+            )
         return cleaned
     except Exception as e:
         # Fail immediately - don't retry with garbage data downstream
@@ -1881,7 +1909,7 @@ def askChatQuestion(prompt,
 
 
 def getYN(text):
-    """Standardize yes/no answers"""
+    """Standardize yes/no answers without converting inference errors to 'no'."""
     messages = [
         {'role': 'system',
          'content': 'You are an API that standardizes yes or no answers. You may only return a one word answer in lowercase or "None" as appropriate.'},
@@ -1889,12 +1917,18 @@ def getYN(text):
          'content': f'Please return a value for the following text, coding the ouput as "yes" for any affirmative response, "no" for any negative response: {text}'}
     ]
 
-    cacheKey = f"getChatContent({messages},3,'gemma3:12b')"
-    result = queryToCache(cacheKey, getChatContent, args=(messages, 3, 'gemma3:12b'))
-    if result:
-        result = result.lower().replace('"', '')
-    else:
-        result = "no"
+    def classify():
+        answer = getChatContent(messages, 16, getYNModel,
+                                extra_params=getYNExtraParams)
+        answer = answer.strip().lower().replace('"', '')
+        if answer not in {'yes', 'no', 'none'}:
+            raise ValueError(f'Invalid getYN response: {answer!r}')
+        return answer
+
+    cacheKey = f"getYN({messages!r},model={getYNModel!r},extra_params={getYNExtraParams!r})"
+    result = queryToCache(cacheKey, classify)
+    if result not in {'yes', 'no', 'none'}:
+        raise ValueError(f'Invalid cached getYN response: {result!r}')
     return result
 
 

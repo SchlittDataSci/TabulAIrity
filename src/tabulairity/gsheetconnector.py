@@ -5,6 +5,7 @@ import pandas as pd
 from . import core as tb
 
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from time import sleep
 
@@ -45,6 +46,34 @@ def checkViability(pageText):
     return True
 
 
+def _translateAlertColumns(df, columns=('title', 'summary'), workers=8):
+    """Translate alert fields concurrently using TabulAIrity's configured translator.
+
+    Preserve autoTranslate's output columns, row order, and failure behavior.
+    Shared texts are translated once, avoiding duplicate concurrent cache misses.
+    """
+    df = df.copy(deep=True)
+    pending = {}
+    for column in columns:
+        language_col = f'{column}_language'
+        translated_col = f'{column}_translated'
+        df[language_col] = df[column].apply(tb.getLanguage)
+        df[translated_col] = df[column]
+        for text in df.loc[df[language_col] != tb.targetLanguage, column]:
+            pending.setdefault(text, None)
+
+    if pending:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {executor.submit(tb.translateOne, text): text for text in pending}
+            for future in as_completed(futures):
+                pending[futures[future]] = future.result()  # propagate inference failures
+
+        for column in columns:
+            mask = df[f'{column}_language'] != tb.targetLanguage
+            df.loc[mask, f'{column}_translated'] = df.loc[mask, column].map(pending)
+    return df
+
+
 def getGAlerts(alertsDf):
     """Takes a google alerts feed google sheet and returns a full feeds df with translated titles"""
     feedDfs = []
@@ -56,8 +85,7 @@ def getGAlerts(alertsDf):
 
     mergedFeeds = pd.concat(feedDfs)
     mergedFeeds = mergedFeeds.groupby('url').first().reset_index()
-    mergedFeeds = tb.autoTranslate(mergedFeeds,'title')
-    mergedFeeds = tb.autoTranslate(mergedFeeds,'summary')
+    mergedFeeds = _translateAlertColumns(mergedFeeds, workers=8)
     mergedFeeds = mergedFeeds.merge(alertsDf)
     mergedFeeds['scraped_text'] = mergedFeeds.url.apply(tb.cachePage)
     mergedFeeds['viable_page'] = mergedFeeds.scraped_text.apply(checkViability)
