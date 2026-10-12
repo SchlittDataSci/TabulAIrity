@@ -337,22 +337,24 @@ def viz_notify_chatnet_reset(chatnet_id: int):
     viz_emit("chatnet_reset", {"chatnet_id": chatnet_id})
 
 
-def viz_notify_standalone_prompt(prompt: str, persona: str, model: str):
+def viz_notify_standalone_prompt(prompt: str, persona: str, model: str, request_id: str | None = None):
     if not _viz_enabled:
         return
     viz_emit("standalone_prompt", {
         "prompt": (prompt or "")[:500],
         "persona": (persona or "")[:200],
         "model": str(model),
+        "request_id": request_id,
     })
 
 
-def viz_notify_standalone_response(prompt: str, response: str):
+def viz_notify_standalone_response(prompt: str, response: str, request_id: str | None = None):
     if not _viz_enabled:
         return
     viz_emit("standalone_response", {
         "prompt": (prompt or "")[:500],
         "response": (response or "")[:500],
+        "request_id": request_id,
     })
 
 
@@ -906,6 +908,7 @@ const panel = document.getElementById("panel");
 const panelCount = document.getElementById("panelCount");
 let panelEntries = 0;
 const popupStore = new Map(); // `${cid}::${nodeId}` -> {prompt, persona, response, cleaned, fullPrompt}
+const standalonePending = new Map(); // request_id -> original standalone prompt
 function ensurePanelNotEmpty(){
   const empt = panel.querySelector(".empty");
   if(empt) empt.remove();
@@ -1100,12 +1103,12 @@ function handleEvent(msg){
     // side panel always shows immediately (not gated); graph color already handled by node_complete
     addPanelEntry(p.chatnet_id, p.node_id, p.prompt, p.response, p.cleaned, {persona: p.persona||'', fx: p.fx||'', fullPrompt: p.fullPrompt||p.prompt, state: 'completed'});
   } else if(t==="standalone_prompt"){
-    // store for pairing with response? just note
-    window._lastStandalone = p;
+    if(p.request_id) standalonePending.set(p.request_id, p);
   } else if(t==="standalone_response"){
-    const lp = window._lastStandalone || {};
-    addStandaloneEntry(lp.prompt||p.prompt, p.response, lp.persona);
-    window._lastStandalone=null;
+    const lp = p.request_id ? standalonePending.get(p.request_id) : null;
+    if(p.request_id) standalonePending.delete(p.request_id);
+    // An unmatched response still displays its own prompt, never another call's.
+    addStandaloneEntry(p.prompt || lp?.prompt || '', p.response, lp?.persona || '');
   } else if(t==="chatnet_complete"){
     const ch = chatnets.get(String(p.chatnet_id));
     if(ch){

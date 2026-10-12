@@ -20,6 +20,7 @@ import requests
 from geopy.geocoders import Nominatim
 import pickle
 import hashlib
+from uuid import uuid4
 import pycountry
 import sqlite3
 import asyncio
@@ -388,10 +389,10 @@ maxTranslateTokens = 8000
 promptDelay = 0.0
 promptTimeout = 1200
 targetLanguage = 'en'
-translationModel = "gemma3:27b"
-getYNModel = "gemma3:12b"
-translationExtraParams = None
-getYNExtraParams = None
+translationModel = "gemma4:26b"
+getYNModel = "gemma4:26b"
+translationExtraParams = {"reasoning_effort": "none"}
+getYNExtraParams = {"reasoning_effort": "none"}
 
 
 def getPromptTimeout(timeout=None):
@@ -1871,11 +1872,14 @@ def askChatQuestion(prompt,
                     timeout=None):
     """Ask a question to the chat model"""
     timeout = getPromptTimeout(timeout)
-    # viz: standalone prompt — suppress duplicate entries during graph walks
-    if _viz_enabled and _viz_walk_active == 0:
+    # Correlate standalone viz events across concurrent calls.
+    viz_request_id = uuid4().hex if _viz_enabled and _viz_walk_active == 0 else None
+    if viz_request_id:
         try:
             from .visualization import viz_notify_standalone_prompt
-            viz_notify_standalone_prompt(str(prompt)[:500], str(persona)[:200], str(model))
+            viz_notify_standalone_prompt(
+                str(prompt)[:500], str(persona)[:200], str(model),
+                request_id=viz_request_id)
         except Exception:
             pass
 
@@ -1899,10 +1903,12 @@ def askChatQuestion(prompt,
         kwargs={'temperature': temperature, 'seed': seed, 'timeout': timeout, 'extra_params': extra_params},
         tolerant=False,
     )
-    if _viz_enabled and _viz_walk_active == 0:
+    if viz_request_id:
         try:
             from .visualization import viz_notify_standalone_response
-            viz_notify_standalone_response(str(prompt)[:500], str(result)[:500])
+            viz_notify_standalone_response(
+                str(prompt)[:500], str(result)[:500],
+                request_id=viz_request_id)
         except Exception:
             pass
     return result
