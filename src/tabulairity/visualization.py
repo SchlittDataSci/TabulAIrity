@@ -173,7 +173,7 @@ def _generate_title_sync(G, chatnet_id: int) -> str:
                 cacheKey,
                 _core.getChatContent,
                 args=(messages, 20, _core.modelName),
-                kwargs={"temperature": None, "seed": None, "timeout": 600, "extra_params": None},
+                kwargs={"temperature": None, "seed": None, "timeout": _core.getPromptTimeout(), "extra_params": None},
                 tolerant=False,
             )
             title = str(title).strip().strip('"').strip("'")

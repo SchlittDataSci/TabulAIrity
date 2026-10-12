@@ -25,6 +25,9 @@ import sqlite3
 import asyncio
 import traceback
 import sys
+import argparse
+import ast
+import math
 
 # ---------------------------------------------------------------------------
 # Visualization hook flag — flipped by visualization.vizOn/vizOff.
@@ -383,8 +386,30 @@ else:
 modelName = "gemma3:12b"
 maxTranslateTokens = 8000
 promptDelay = 0.0
+promptTimeout = 1200
 targetLanguage = 'en'
 translationModel = "gemma3:27b"
+
+
+def getPromptTimeout(timeout=None):
+    """Resolve a positive timeout: explicit argument, CLI flag, then default.
+
+    The CLI flags are read with parse_known_args so importing the library does
+    not consume an application's arguments. Applications with their own parser
+    should also register --prompt-timeout and pass its value to walkChatNet.
+    """
+    if timeout is None:
+        parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+        parser.add_argument('--prompt-timeout', '--promptTimeout', type=float)
+        args, _ = parser.parse_known_args()
+        timeout = args.prompt_timeout if args.prompt_timeout is not None else promptTimeout
+    try:
+        value = float(timeout)
+    except (TypeError, ValueError) as exc:
+        raise ValueError('Prompt timeout must be a positive number of seconds') from exc
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError('Prompt timeout must be a positive number of seconds')
+    return value
 
 
 def _parseEnvLines(lines):
@@ -550,8 +575,14 @@ def mapEdgeColor(fx):
 
 
 def buildChatNet(script, show=False):
+    # Normalize a private copy. Callers often retain/reuse the Sheet-backed
+    # DataFrame, so graph construction must not mutate it in place.
+    script = script.copy()
+    viz_script = script.copy(deep=True)
     script['fx'] = script['fx'].fillna('null')
     script['prompt'] = script['prompt'].fillna('')
+    if 'self_eval' not in script.columns:
+        script['self_eval'] = False
     script['self_eval'] = script['self_eval'].fillna(False)
 
     if 'model' not in script.columns:
@@ -629,7 +660,7 @@ def buildChatNet(script, show=False):
     if _viz_enabled:
         try:
             from .visualization import viz_notify_graph_load
-            viz_notify_graph_load(G)
+            viz_notify_graph_load(G, chatnet=viz_script)
         except Exception:
             pass
     return G
@@ -646,27 +677,197 @@ def insertChatVars(text, varStore):
     """
     if not isinstance(text, str):
         return text
-    for key, value in varStore.items():
-        toReplace = f'[{key}]'
-        text = text.replace(toReplace, str(value))
-    return text
+    return _resolveChatTemplate(text, varStore)[0]
+
+
+def _resolveChatTemplate(text, varStore):
+    """Resolve original bracket expressions from the inside out.
+
+    Return (text, referenced keys, unresolved dynamic keys). Values inserted
+    from source material are not themselves interpreted as templates.
+    """
+    if not isinstance(text, str):
+        return text, set(), set()
+    refs, unresolved = set(), set()
+
+    def resolve(fragment):
+        output = []
+        cursor = 0
+        while cursor < len(fragment):
+            start = fragment.find('[', cursor)
+            if start < 0:
+                output.append(fragment[cursor:])
+                break
+            output.append(fragment[cursor:start])
+            depth, end = 1, start + 1
+            while end < len(fragment) and depth:
+                depth += (fragment[end] == '[') - (fragment[end] == ']')
+                end += 1
+            if depth:
+                output.append(fragment[start:])
+                break
+            inner = fragment[start + 1:end - 1]
+            nested = '[' in inner
+            key = resolve(inner) if nested else inner
+            if key and '\n' not in key and ',' not in key:
+                # An unresolved inner expression is not yet a variable name.
+                if '[' not in key and ']' not in key:
+                    refs.add(key)
+                    if key in varStore:
+                        output.append(str(varStore[key]))
+                    else:
+                        output.append('[' + key + ']')
+                        if nested:
+                            unresolved.add(key)
+                else:
+                    output.append('[' + key + ']')
+                    if nested:
+                        unresolved.add(key)
+            else:
+                output.append('[' + key + ']')
+            cursor = end
+        return ''.join(output)
+
+    return resolve(text), refs, unresolved
 
 
 def extractChatVars(text):
+    if not isinstance(text, str):
+        return []
     matches = set(re.findall(r"\[([^\[\]]*(?:\[[^\[\]]*\][^\[\]]*)*)\]", text))
     matches = [match for match in matches if "\n" not in match and "," not in match]
     matches = [match for match in matches if match != '']
     return matches
 
 
+def _stripChatReasoning(text):
+    """Drop reasoning blocks outside containers, preserving quoted data."""
+    pattern = re.compile(r'<(think|analysis)\b[^>]*>.*?</\1>', re.DOTALL | re.IGNORECASE)
+    parts, stack = [], []
+    quote, escaped, cursor, kept = None, False, 0, 0
+    pairs = {']': '[', '}': '{', ')': '('}
+    while cursor < len(text):
+        char = text[cursor]
+        if not stack and char == '<':
+            match = pattern.match(text, cursor)
+            if match:
+                parts.append(text[kept:cursor])
+                cursor = kept = match.end()
+                continue
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == '\\':
+                escaped = True
+            elif char == quote:
+                quote = None
+        elif stack and char in ('"', "'"):
+            quote = char
+        elif char in '[{(':
+            stack.append(char)
+        elif char in pairs and stack:
+            if stack[-1] == pairs[char]:
+                stack.pop()
+        cursor += 1
+    parts.append(text[kept:])
+    return ''.join(parts)
+
+
+def insertJson(response, chatVars=None):
+    """Extract a complete JSON/container value without modifying its contents.
+
+    Accept already-decoded containers, Markdown fences, surrounding prose,
+    and Python literal containers. Invalid or truncated containers raise;
+    nested fragments are never salvaged from a malformed outer container.
+    """
+    containers = (dict, list, tuple, set)
+    if isinstance(response, containers):
+        return response
+    if isinstance(response, bytes):
+        response = response.decode('utf-8')
+    if not isinstance(response, str):
+        raise ValueError('Expected JSON or an iterable container')
+    text = response.strip()
+
+    def decode(candidate):
+        try:
+            parsed = json.loads(candidate)
+        except (json.JSONDecodeError, ValueError):
+            parsed = ast.literal_eval(candidate)
+        if not isinstance(parsed, containers):
+            raise ValueError('Expected a JSON object, array, or literal container')
+        return parsed
+
+    try:
+        return decode(text)
+    except (ValueError, SyntaxError):
+        pass
+    text = _stripChatReasoning(text).strip()
+    fences = re.findall(r'```(?:json|python)?\s*\n?(.*?)```', text,
+                        flags=re.DOTALL | re.IGNORECASE)
+    candidates = fences or [text]
+    for candidate in candidates:
+        try:
+            return decode(candidate.strip())
+        except (ValueError, SyntaxError):
+            pass
+        cursor = 0
+        while cursor < len(candidate):
+            match = re.search(r'[\[{]', candidate[cursor:])
+            if not match:
+                break
+            start = cursor + match.start()
+            stack, quote, escaped = [], None, False
+            end = start
+            for end in range(start, len(candidate)):
+                char = candidate[end]
+                if quote:
+                    if escaped:
+                        escaped = False
+                    elif char == '\\':
+                        escaped = True
+                    elif char == quote:
+                        quote = None
+                    continue
+                if char in ('"', "'"):
+                    quote = char
+                elif char in '[{':
+                    stack.append(char)
+                elif char in ']}':
+                    if not stack or stack.pop() != ( '[' if char == ']' else '{'):
+                        break
+                    if not stack:
+                        break
+            if stack or quote:
+                # Do not extract a seemingly valid inner object from a
+                # truncated outer response.
+                break
+            try:
+                return decode(candidate[start:end + 1])
+            except (ValueError, SyntaxError):
+                cursor = end + 1
+    raise ValueError('No complete JSON or literal container found in response')
+
+
+def mergeJson(response, chatVars):
+    """Extract a complete JSON object and overwrite its keys in chatVars."""
+    parsed = insertJson(response)
+    if not isinstance(parsed, dict):
+        raise ValueError('mergeJson requires a JSON object')
+    chatVars.update(parsed)
+    return parsed
+
+
 baseFx = {'isYes': lambda x, y: ynToBool(x),
           'isNo': lambda x, y: not ynToBool(x),
           'getYN': lambda x, y: getYN(x),
           'null': lambda x, y: True,
-          'pass': lambda x, y: x}
+          'pass': lambda x, y: x,
+          'mergeJson': mergeJson,
+          'insertJson': insertJson}
 
 
-def processNodeStep(currentNode, G, chatVars, fxStore, verbosity):
+def processNodeStep(currentNode, G, chatVars, fxStore, verbosity, timeout=None):
     """Process a single node.
 
     Returns (nextNodes, nodeErrors). nodeErrors is a list of structured error
@@ -693,7 +894,7 @@ def processNodeStep(currentNode, G, chatVars, fxStore, verbosity):
         # natural home for role and criteria, so they need the same treatment.
         persona = insertChatVars(nodeVars['persona'], chatVars)
         rowModel = nodeVars['model']
-        selfEval = nodeVars['self_eval']
+        selfEval = nodeVars.get('self_eval', False)
         extraParams = nodeVars.get('extra_params', None)
     except Exception as e:
         print(f"\n[ERROR] Node '{currentNode}' preparation failed")
@@ -728,7 +929,8 @@ def processNodeStep(currentNode, G, chatVars, fxStore, verbosity):
                                                 persona,
                                                 model=rowModel,
                                                 tokens=tokens,
-                                                extra_params=extraParams)
+                                                extra_params=extraParams,
+                                                timeout=timeout)
 
                 if verbosity > 0:
                     print(f"   <<< Finished '{currentNode}': {chatResponse[:100]}...")
@@ -839,7 +1041,185 @@ def processNodeStep(currentNode, G, chatVars, fxStore, verbosity):
         return [], nodeErrors
 
 
-async def process_one_node(node, G, chatVars, fxStore, verbosity, semaphore, workerID=0):
+class _NodeVariables(dict):
+    """A node's isolated top-level writes, committed only after it settles."""
+    def __init__(self, values, isolateNested=False):
+        # Pure built-ins only assign top-level values. Custom callables may
+        # mutate existing containers in place, so isolate those snapshots too.
+        snapshots = dict(values)
+        mutableTypes = (dict, list, set, tuple, pd.Series, pd.DataFrame, np.ndarray)
+        if isolateNested:
+            snapshots = {key: deepcopy(value) if isinstance(value, mutableTypes) else value
+                         for key, value in snapshots.items()}
+        super().__init__(snapshots)
+        self.nestedOriginal = {}
+        if isolateNested:
+            for key, value in self.items():
+                if isinstance(value, mutableTypes):
+                    self.nestedOriginal[key] = pickle.dumps(value)
+        self.writes = {}
+        self.deleted = set()
+        self.timedOut = False
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        self.writes[key] = value
+        self.deleted.discard(key)
+
+    def __delitem__(self, key):
+        super().__delitem__(key)
+        self.writes.pop(key, None)
+        self.deleted.add(key)
+
+    def update(self, *args, **kwargs):
+        for key, value in dict(*args, **kwargs).items():
+            self[key] = value
+
+    def setdefault(self, key, default=None):
+        if key not in self:
+            self[key] = default
+        return self[key]
+
+    def pop(self, key, *default):
+        if key in self:
+            value = self[key]
+            del self[key]
+            return value
+        return super().pop(key, *default)
+
+    def popitem(self):
+        if not self:
+            raise KeyError('popitem(): dictionary is empty')
+        key = next(reversed(self))
+        return key, self.pop(key)
+
+    def clear(self):
+        for key in list(self):
+            del self[key]
+
+    def __ior__(self, other):
+        self.update(other)
+        return self
+
+    def commit(self, target):
+        if not self.timedOut:
+            for key, before in self.nestedOriginal.items():
+                if key in self and key not in self.writes and pickle.dumps(self[key]) != before:
+                    self.writes[key] = self[key]
+            for key in self.deleted:
+                target.pop(key, None)
+            target.update(self.writes)
+
+
+def _chatVarProducer(key, G):
+    if key in G:
+        return key
+    for suffix in ('_raw', '_prompt'):
+        if key.endswith(suffix) and key[:-len(suffix)] in G:
+            return key[:-len(suffix)]
+    for source, target in G.edges():
+        if key == f'{source}-{target}':
+            return source
+    return None
+
+
+def parallelFx(function):
+    """Opt in a pure custom cleaner to parallel scheduling.
+
+    The cleaner must not mutate chatVars or shared state. Any chatVars it
+    reads must also appear as references in the node's prompt or persona.
+    Unknown callables remain conservative unless explicitly marked.
+    """
+    function._tabulairity_parallel_safe = True
+    return function
+
+
+def _parallelChatFxNames(fxStore=None):
+    return {name for name, function in (fxStore or {}).items()
+            if getattr(function, '_tabulairity_parallel_safe', False)}
+
+
+def _hasCustomChatFx(node, G, fxStore=None):
+    known = set(baseFx) | _parallelChatFxNames(fxStore)
+    return G.nodes[node].get('fx', 'null') not in known or any(
+        edge.get('fx', 'null') not in known
+        for _, _, edge in G.out_edges(node, data=True))
+
+
+def buildChatNetDependencies(G, varStore=None, fxStore=None):
+    """Overlay data dependencies and pruning barriers on a chat network.
+
+    Unconditional control edges define potential reachability, not execution
+    order. Every conditional edge's source gates the target and all of its
+    descendants. Dynamic templates and unknown/custom variable writers gate
+    their descendants too. Rebuild with settled variables to discover dynamic
+    targets; the original control graph is never changed.
+    """
+    values = varStore if varStore is not None else {}
+    overlay = nx.DiGraph()
+    overlay.add_nodes_from(G.nodes())
+    pureFx = {'null', 'pass', 'getYN', 'isYes', 'isNo', 'insertJson'} | _parallelChatFxNames(fxStore)
+
+    def depend(source, target, kind, variable=None):
+        if source == target:
+            return
+        if not overlay.has_edge(source, target):
+            overlay.add_edge(source, target, kinds=set(), variables=set())
+        data = overlay[source][target]
+        data['kinds'].add(kind)
+        if variable is not None:
+            data['variables'].add(variable)
+
+    for node, data in G.nodes(data=True):
+        templates = (data.get('prompt', ''), data.get('persona', ''))
+        dynamic = any(isinstance(text, str) and re.search(r'\[[^\]\n]*\[', text)
+                      for text in templates)
+        overlay.nodes[node]['dynamic'] = bool(dynamic)
+        for text in templates:
+            _, refs, _ = _resolveChatTemplate(text, values)
+            for key in refs:
+                producer = _chatVarProducer(key, G)
+                if producer is not None:
+                    depend(producer, node, 'data', key)
+        fx = data.get('fx', 'null')
+        opaque = fx not in pureFx and fx != 'mergeJson'
+        opaqueEdges = any(edge.get('fx', 'null') not in pureFx
+                          for _, _, edge in G.out_edges(node, data=True))
+        if opaque or opaqueEdges:
+            # Custom callables may read chatVars without bracket references.
+            for ancestor in nx.ancestors(G, node):
+                depend(ancestor, node, 'order')
+        # self_eval may reject the node after inference, before any edges open.
+        # All descendants must await that decision even on unconditional paths.
+        if data.get('self_eval', False) or dynamic or fx == 'mergeJson' or opaque or opaqueEdges:
+            for descendant in nx.descendants(G, node):
+                depend(node, descendant, 'barrier')
+
+    if 'Start' in G:
+        for descendant in nx.descendants(G, 'Start'):
+            depend('Start', descendant, 'barrier')
+    for source, target, data in G.edges(data=True):
+        if data.get('fx', 'null') != 'null':
+            for descendant in {target} | nx.descendants(G, target):
+                depend(source, descendant, 'barrier')
+    return overlay
+
+
+def _possibleChatNodes(G, settled, children):
+    """Reachability with unresolved edges retained and rejected edges removed."""
+    active, pending = set(), ['Start'] if 'Start' in G else []
+    while pending:
+        node = pending.pop()
+        if node in active or node not in G:
+            continue
+        active.add(node)
+        targets = children.get(node, ()) if node in settled else G.successors(node)
+        pending.extend(targets)
+    return active
+
+
+async def process_one_node(node, G, chatVars, fxStore, verbosity, semaphore, workerID=0,
+                           timeout=None):
     """Process single node and return (nextNodes, nodeErrors).
 
     Errors (including timeouts and unexpected exceptions) are recorded as
@@ -854,6 +1234,12 @@ async def process_one_node(node, G, chatVars, fxStore, verbosity, semaphore, wor
         
         async with semaphore:
             try:
+                # self_eval performs four additional model calls after the
+                # node's answer. Those helpers retain their default/CLI timeout.
+                # The node watchdog must leave room for that existing workflow.
+                nodeBudget = getPromptTimeout(timeout)
+                if G.nodes[node].get('self_eval', False):
+                    nodeBudget += 4 * getPromptTimeout()
                 nextNodes, nodeErrors = await asyncio.wait_for(
                     asyncio.to_thread(
                         processNodeStep,
@@ -861,11 +1247,14 @@ async def process_one_node(node, G, chatVars, fxStore, verbosity, semaphore, wor
                         G,
                         chatVars,
                         fxStore,
-                        verbosity
+                        verbosity,
+                        timeout
                     ),
-                    timeout=1500  # 15 minute max per node
+                    timeout=max(1500, nodeBudget + 300)
                 )
             except asyncio.TimeoutError:
+                if isinstance(chatVars, _NodeVariables):
+                    chatVars.timedOut = True
                 elapsed = (datetime.utcnow() - startTime).total_seconds()
                 msg = f"Node '{node}' timed out after {elapsed:.0f}s"
                 print(f"\n[ERROR] {msg}")
@@ -885,101 +1274,147 @@ async def process_one_node(node, G, chatVars, fxStore, verbosity, semaphore, wor
         return [], [{node: msg, 'type': 'node'}]
 
 
-async def walkChatNetAsync(G, fxStore, varStore, verbosity, numWorkers=4, tolerant=False):
-    """Async graph traversal with wave-based processing.
+async def walkChatNetAsync(G, fxStore, varStore, verbosity, numWorkers=4, tolerant=False,
+                           timeout=None):
+    """Schedule ready nodes on each completion, with inferred dependencies.
 
-    If tolerant is False (default), traversal stops after the current wave
-    finishes if any node/edge in that wave produced an error (nodes already
-    dispatched in that wave are allowed to complete, since they're running
-    concurrently, but no further waves are started). If tolerant is True,
-    traversal continues across all reachable waves regardless of errors,
-    enabling partial completion.
+    Conditional edges and self_eval retain pruning across every descendant.
+    Dynamic templates and unknown variable writers are conservative barriers.
+    Nodes execute at most once. Failures stop new dispatches by default; running
+    nodes are drained. Tolerant mode continues independent reachable branches.
 
     Returns chatVars with two additional keys:
       - 'success': True only if every reachable node ran without error
       - 'errors': list of {<node/edge name>: <message>, 'type': 'node'|'edge'}
     """
-    _viz_cid = _viz_cid_for_graph(G) if _viz_enabled else None
-    if _viz_enabled and _viz_cid is None:
-        try:
-            from .visualization import viz_notify_graph_load
-            _viz_cid = viz_notify_graph_load(G)
-        except Exception:
-            pass
-    if _viz_enabled and _viz_cid is not None:
-        try:
-            from .visualization import viz_notify_node_queued
-            viz_notify_node_queued(_viz_cid, 'Start')
-        except Exception:
-            pass
     global _viz_walk_active
     _viz_walk_active += 1
     try:
+        _viz_cid = _viz_cid_for_graph(G) if _viz_enabled else None
+        if _viz_enabled and _viz_cid is None:
+            try:
+                from .visualization import viz_notify_graph_load
+                _viz_cid = viz_notify_graph_load(G)
+            except Exception:
+                pass
+        if not isinstance(numWorkers, int) or numWorkers < 1:
+            raise ValueError('numWorkers must be a positive integer')
+        timeout = getPromptTimeout(timeout)
         if isinstance(varStore, pd.Series):
             chatVars = varStore.to_dict()
         else:
             chatVars = dict(varStore) if varStore is not None else {}
         fxStore = fxStore | baseFx
         semaphore = asyncio.Semaphore(numWorkers)
-        
-        currentWave = ['Start']
-        waveNumber = 0
+    
+        settled, failed, children, running = set(), set(), {}, {}
+        dispatched = 0
         errors = []
         stopped = False
+        if 'Start' not in G:
+            errors.append({'walkChatNet': "Chat graph has no 'Start' node", 'type': 'node'})
+            stopped = True
 
         try:
-            while currentWave:
-                waveNumber += 1
-                if verbosity > 0:
-                    if len(currentWave) <= 10:
-                        print(f"\n[Wave {waveNumber}] Processing {len(currentWave)} nodes: {currentWave}")
-                    else:
-                        print(f"\n[Wave {waveNumber}] Processing {len(currentWave)} nodes: {currentWave[:10]} ... and {len(currentWave) - 10} more")
-                
-                # Create tasks for all nodes in current wave
-                tasks = []
-                for idx, node in enumerate(currentWave):
-                    task = asyncio.create_task(
-                        process_one_node(node, G, chatVars, fxStore, verbosity, semaphore, workerID=idx % numWorkers)
-                    )
-                    tasks.append((node, task))
-                
-                # Wait for ALL nodes in this wave to complete
-                nextWave = []
-                for node, task in tasks:
+            while True:
+                active = _possibleChatNodes(G, settled, children)
+                overlay = buildChatNetDependencies(G, chatVars, fxStore)
+                G.graph['dependency_graph'] = overlay
+                inFlight = {node for node, _ in running.values()}
+                customRunning = any(_hasCustomChatFx(node, G, fxStore) for node in inFlight)
+                pending = [node for node in G if node in active and node not in settled | inFlight]
+                waiting = {}
+                refreshNeeded = False
+                if not stopped:
+                    for node in pending:
+                        blockers = []
+                        for producer, _, dep in overlay.in_edges(node, data=True):
+                            if 'data' in dep['kinds']:
+                                if producer not in settled or producer in failed or producer not in active:
+                                    blockers.append(producer)
+                            elif producer in active and producer not in settled:
+                                blockers.append(producer)
+                        unresolved = set()
+                        for text in (G.nodes[node].get('prompt', ''), G.nodes[node].get('persona', '')):
+                            _, _, missing = _resolveChatTemplate(text, chatVars)
+                            unresolved.update(missing)
+                        if blockers or unresolved:
+                            waiting[node] = (blockers, unresolved)
+                            continue
+                        if len(running) >= numWorkers:
+                            continue
+                        customFx = _hasCustomChatFx(node, G, fxStore)
+                        # Hidden in-place mutations cannot be merged reliably
+                        # across snapshots. Unknown callbacks take turns; ordinary
+                        # inference/known cleaners can still run in parallel.
+                        if customFx and customRunning:
+                            continue
+                        try:
+                            localVars = _NodeVariables(chatVars, isolateNested=customFx)
+                        except Exception as exc:
+                            errors.append({node: f'Variable snapshot failed: {exc}', 'type': 'node'})
+                            settled.add(node)
+                            failed.add(node)
+                            children[node] = set()
+                            stopped = not tolerant
+                            refreshNeeded = True
+                            break
+                        if _viz_enabled and _viz_cid is not None:
+                            try:
+                                from .visualization import viz_notify_node_queued
+                                viz_notify_node_queued(_viz_cid, node)
+                            except Exception:
+                                pass
+                        task = asyncio.create_task(process_one_node(
+                            node, G, localVars, fxStore, verbosity, semaphore,
+                            workerID=dispatched % numWorkers, timeout=timeout))
+                        running[task] = (node, localVars)
+                        customRunning = customRunning or customFx
+                        dispatched += 1
+                if refreshNeeded and not stopped:
+                    continue
+                if not running:
+                    if pending and not stopped:
+                        for node in pending:
+                            blockers, unresolved = waiting.get(node, ([], set()))
+                            message = (f'Unresolved dependencies: {blockers}; '
+                                       f'dynamic variables: {sorted(unresolved)}. '
+                                       'A producer failed, was pruned, is absent, or the graph has a dependency cycle.')
+                            errors.append({node: message, 'type': 'node'})
+                    break
+                done, _ = await asyncio.wait(running, return_when=asyncio.FIRST_COMPLETED)
+                # Process every completed result before considering any new work.
+                for task in sorted(done, key=lambda item: str(running[item][0])):
+                    node, localVars = running.pop(task)
                     childNodes, nodeErrors = await task
+                    try:
+                        localVars.commit(chatVars)
+                    except Exception as exc:
+                        childNodes = []
+                        nodeErrors.append({node: f'Variable writeback failed: {exc}', 'type': 'node'})
+                    settled.add(node)
+                    children[node] = set(childNodes)
+                    if any(error.get('type') == 'node' for error in nodeErrors):
+                        failed.add(node)
                     if nodeErrors:
                         errors.extend(nodeErrors)
                         if not tolerant:
                             stopped = True
-                            continue  # don't chain children of a failed node
-                    nextWave.extend(childNodes)
-
-                if stopped:
-                    if verbosity > 0:
-                        print(f"\n[STOPPED] Wave {waveNumber} hit an error; halting before the next wave (tolerant=False)")
-                    break
-
-                # Remove duplicates, sort for next wave
-                currentWave = sorted(set(nextWave), reverse=True)
-                # viz: queued for next wave
-                if _viz_enabled and _viz_cid is not None and currentWave:
-                    try:
-                        from .visualization import viz_notify_node_queued
-                        for _n in currentWave:
-                            viz_notify_node_queued(_viz_cid, _n)
-                    except Exception:
-                        pass
-            
             if verbosity > 0:
-                print(f"\n[Complete] Processed {waveNumber} waves")
-        
+                print(f"\n[Complete] Processed {len(settled)} nodes" +
+                      ('; stopped after an error' if stopped else ''))
+    
         except KeyboardInterrupt:
             print("\n[!] Execution interrupted by user.")
             errors.append({'walkChatNet': 'Execution interrupted by user (KeyboardInterrupt)', 'type': 'node'})
             chatVars['success'] = False
             chatVars['errors'] = errors
             raise
+        finally:
+            for task in running:
+                task.cancel()
+            if running:
+                await asyncio.gather(*running, return_exceptions=True)
 
         chatVars['success'] = len(errors) == 0
         chatVars['errors'] = errors
@@ -1000,7 +1435,8 @@ def walkChatNet(G,
                 verbosity=1,
                 runAsync=False,
                 numWorkers=4,
-                tolerant=False):
+                tolerant=False,
+                timeout=None):
     """Main entry point for graph traversal.
 
     Node/edge fx failures are never allowed to crash unpredictably or vanish
@@ -1016,6 +1452,7 @@ def walkChatNet(G,
       - 'errors': list of {<node/edge name>: <message>, 'type': 'node'|'edge'}
     """
     global useCache
+    timeout = getPromptTimeout(timeout)
 
     try:
         if runAsync:
@@ -1030,7 +1467,7 @@ def walkChatNet(G,
                     import nest_asyncio
                     nest_asyncio.apply()
 
-                result = asyncio.run(walkChatNetAsync(G, fxStore, varStore, verbosity, numWorkers, tolerant))
+                result = asyncio.run(walkChatNetAsync(G, fxStore, varStore, verbosity, numWorkers, tolerant, timeout))
                 return result
 
             except ImportError:
@@ -1070,7 +1507,7 @@ def walkChatNet(G,
 
                 while toAsk != []:
                     nextQ = toAsk.pop()
-                    nextNodes, nodeErrors = processNodeStep(nextQ, G, chatVars, fxStore, verbosity)
+                    nextNodes, nodeErrors = processNodeStep(nextQ, G, chatVars, fxStore, verbosity, timeout)
                     if nodeErrors:
                         errors.extend(nodeErrors)
                         if not tolerant:
@@ -1370,9 +1807,10 @@ def getChatContent(messages,
                    modelName,
                    temperature=None,
                    seed=None,
-                   timeout=600,
+                   timeout=None,
                    extra_params=None):
     """Get completion from LLM with timeout - FAIL FAST on errors"""
+    timeout = getPromptTimeout(timeout)
     modelRoute, ip, apiKey = getModelRoute(modelName)
     
     try:
@@ -1401,9 +1839,11 @@ def askChatQuestion(prompt,
                     tokens=2000,
                     temperature=None,
                     seed=None,
-                    extra_params=None):
+                    extra_params=None,
+                    timeout=None):
     """Ask a question to the chat model"""
-    # viz: standalone prompt — emit only when NOT inside walkChatNet to avoid double right-panel entries
+    timeout = getPromptTimeout(timeout)
+    # viz: standalone prompt — suppress duplicate entries during graph walks
     if _viz_enabled and _viz_walk_active == 0:
         try:
             from .visualization import viz_notify_standalone_prompt
@@ -1421,12 +1861,14 @@ def askChatQuestion(prompt,
         {'role': 'user', 'content': prompt[:350000]}
     ]
 
+    # Keep the legacy cache identity. A transport timeout does not change the
+    # answer, and changing this token would invalidate existing prompt caches.
     cacheKey = f"getChatContent({messages},{tokens},'{model}',{temperature},{seed},timeout=600,extra_params={repr(extra_params)})"
     result = queryToCache(
         cacheKey,
         getChatContent,
         args=(messages, tokens, model),
-        kwargs={'temperature': temperature, 'seed': seed, 'timeout': 600, 'extra_params': extra_params},
+        kwargs={'temperature': temperature, 'seed': seed, 'timeout': timeout, 'extra_params': extra_params},
         tolerant=False,
     )
     if _viz_enabled and _viz_walk_active == 0:
