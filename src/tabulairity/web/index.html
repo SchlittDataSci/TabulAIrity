@@ -1,0 +1,540 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TabulAIrity Workbench</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to workspace</a>
+    <header class="top">
+      <div class="brand">
+        <span class="mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        <div>
+          <strong>TabulAIrity</strong><span class="brand-sub">WORKBENCH</span>
+        </div>
+      </div>
+      <div class="project-control">
+        <label class="sr-only" for="project-select">Project</label
+        ><select id="project-select">
+          <option value="">Choose a project</option></select
+        ><button id="new-project">New project</button>
+      </div>
+      <div class="top-actions">
+        <span id="save-state" class="muted" role="status">Ready</span
+        ><button id="save-project" class="primary">Save project</button
+        ><button id="export-project">Export folder</button>
+      </div>
+    </header>
+    <div class="shell">
+      <aside class="nav" aria-label="Workbench">
+        <div class="nav-label">WORKSPACE</div>
+        <button data-view="graph" class="nav-item active">
+          <span aria-hidden="true">◈</span> CDEN editor</button
+        ><button data-view="inputs" class="nav-item">
+          <span aria-hidden="true">▤</span> Inputs</button
+        ><button data-view="atoms" class="nav-item">
+          <span aria-hidden="true">◇</span> Atoms</button
+        ><button data-view="models" class="nav-item">
+          <span aria-hidden="true">⇄</span> Models</button
+        ><button data-view="fx" class="nav-item">
+          <span aria-hidden="true">ƒ</span> Functions</button
+        ><button data-view="runs" class="nav-item">
+          <span aria-hidden="true">▷</span> Runs</button
+        ><button data-view="review" class="nav-item">
+          <span aria-hidden="true">◎</span> Review
+        </button>
+        <div class="nav-footer">
+          <span class="local-dot"></span>Local workspace
+          <button id="shortcuts" class="text-button">Keyboard shortcuts</button>
+        </div>
+      </aside>
+      <main id="main" tabindex="-1">
+        <section id="empty" class="empty">
+          <div class="empty-icon">◈</div>
+          <h1>Open a project.</h1>
+          <p>Create a project to edit and run CDENs.</p>
+          <button id="empty-new" class="primary">New project</button>
+          <p class="muted small">
+            Each new project includes a synthetic catalog example.<br />Try a
+            nested run before connecting a model.
+          </p>
+        </section>
+        <div id="workspace" hidden>
+          <div class="page-header">
+            <div>
+              <div class="eyebrow" id="view-eyebrow">BUILD</div>
+              <h1 id="view-title">CDEN editor</h1>
+              <p class="muted" id="view-description"></p>
+            </div>
+            <button id="assistant-open" class="soft">Draft…</button>
+          </div>
+          <section id="view-graph" class="view">
+            <details class="cden-library" id="cden-library">
+              <summary>
+                Browse CDENs
+                <span class="small muted">User / Samples / Internal</span>
+              </summary>
+              <label class="sr-only" for="library-search">Find a CDEN</label
+              ><input
+                id="library-search"
+                type="search"
+                placeholder="Find a CDEN…"
+                autocomplete="off"
+              />
+              <div id="cden-pools" class="pool-grid"></div>
+              <button id="add-bundled">Add bundled CDENs</button>
+              <span class="muted small">Adds missing examples.</span>
+            </details>
+            <div class="graph-toolbar">
+              <label
+                >CDEN
+                <select id="network-select"></select
+              ></label>
+              <button id="new-network">New CDEN</button>
+              <button id="construct-network">Draft CDEN</button>
+              <button id="add-atom">Add atom</button>
+              <details class="network-actions">
+                <summary>More</summary>
+                <div>
+                  <button id="duplicate-network">Duplicate</button>
+                  <button id="set-entry">Set as entry</button>
+                  <button id="weld-net">Join CDENs</button>
+                  <button id="save-atom">Save as atom</button>
+                </div>
+              </details>
+              <span class="spacer"></span>
+              <button id="graph-run" class="primary">Run CDEN</button>
+            </div>
+            <div class="network-info">
+              <p id="network-description" class="muted"></p>
+              <button id="use-example" class="soft" hidden>
+                Use sample inputs
+              </button>
+            </div>
+            <div id="internal-warning" class="internal-warning" hidden>
+              Internal workflow. Changes affect workbench tools.
+              <button id="duplicate-internal">Duplicate to User</button>
+            </div>
+            <div id="graph-health" class="graph-health" role="status"></div>
+            <div id="validation-report" class="validation-report" hidden></div>
+            <div class="canvas-toolbar" aria-label="Graph tools">
+              <button id="add-node">+ Node</button
+              ><button id="add-edge">+ Connection</button>
+              <span class="tool-separator"></span>
+              <button id="undo-edit" title="Undo (Ctrl/Cmd+Z)" disabled>
+                Undo</button
+              ><button id="redo-edit" title="Redo (Ctrl/Cmd+Shift+Z)" disabled>
+                Redo
+              </button>
+              <span class="spacer"></span>
+              <button id="fit-graph">Fit</button
+              ><button id="layout-graph" title="Arrange graph">Arrange</button
+              ><button id="validate-graph">Check</button>
+            </div>
+            <div class="builder">
+              <div class="graph-area">
+                <svg id="graph" role="group" aria-label="Editable CDEN graph">
+                  <defs>
+                    <linearGradient
+                      id="cell-body"
+                      x1="0"
+                      y1="0"
+                      x2="0.85"
+                      y2="1"
+                    >
+                      <stop offset="0" stop-color="#ffffff" />
+                      <stop offset="0.6" stop-color="#fefbff" />
+                      <stop offset="1" stop-color="#ede6f1" />
+                    </linearGradient>
+                    <linearGradient
+                      id="cell-selected"
+                      x1="0"
+                      y1="0"
+                      x2="1"
+                      y2="1"
+                    >
+                      <stop offset="0" stop-color="#fffaff" />
+                      <stop offset="1" stop-color="#eee6f2" />
+                    </linearGradient>
+                    <marker
+                      id="arrow"
+                      viewBox="0 0 10 10"
+                      refX="9"
+                      refY="5"
+                      markerWidth="7"
+                      markerHeight="7"
+                      orient="auto-start-reverse"
+                    >
+                      <path d="M 0 0 L 10 5 L 0 10 z" fill="#7a538e" />
+                    </marker>
+                  </defs>
+                  <g id="graph-world"></g>
+                </svg>
+                <div class="graph-hint">
+                  <span id="graph-summary"></span
+                  ><span>Drag nodes · Scroll to zoom · Drag canvas to pan</span>
+                </div>
+              </div>
+              <aside id="inspector" class="inspector">
+                <div class="inspector-placeholder">
+                  Select a node or edge<br /><span class="small muted"
+                    >Prompts, models and connections.</span
+                  >
+                </div>
+              </aside>
+            </div>
+          </section>
+          <section id="view-inputs" class="view" hidden>
+            <div class="split-cards">
+              <div class="card">
+                <h2>Input data</h2>
+                <p>
+                  CSV columns and JSON record keys become bracket variables such
+                  as <code>[text]</code>. A TXT file becomes one
+                  <code>text</code> record.
+                </p>
+                <label class="dropzone"
+                  >Choose CSV, JSON or TXT<input
+                    id="input-file"
+                    type="file"
+                    multiple
+                    accept=".csv,.json,.txt"
+                /></label>
+                <div id="input-info" class="muted"></div>
+                <label
+                  >File or batch pattern<input
+                    id="input-pattern"
+                    type="text"
+                    placeholder="inputs/Daily_Report_*.csv" /></label
+                ><button id="set-input-pattern">Use this input pattern</button>
+                <p class="small muted">
+                  Patterns match files in this project. CSV batches are read in
+                  chunks.
+                </p>
+              </div>
+              <div class="card">
+                <h2>Project files</h2>
+                <p>
+                  Import CDEN tables or JSON networks. Python functions have
+                  their own editor.
+                </p>
+                <label class="file-button"
+                  >Import CDEN<input
+                    id="cden-file"
+                    type="file"
+                    accept=".csv,.json"
+                /></label>
+                <div id="project-files"></div>
+              </div>
+            </div>
+            <div class="card">
+              <h2>Input preview</h2>
+              <div id="input-preview" class="table-scroll"></div>
+            </div>
+          </section>
+          <section id="view-atoms" class="view" hidden>
+            <div class="card">
+              <div class="section-row">
+                <div>
+                  <h2>Reusable CDENs</h2>
+                  <p>
+                    Insert a workflow as one step. Open its steps to inspect or
+                    adapt it.
+                  </p>
+                </div>
+                <span class="spacer"></span>
+                <button id="atom-from-current">
+                  Save current CDEN as atom
+                </button>
+                <label class="file-button"
+                  >Import atom<input id="atom-file" type="file" accept=".json"
+                /></label>
+              </div>
+              <p class="small muted">
+                Each insertion is an independent copy with unique step names.
+                Test results describe that trial; they do not establish
+                scientific validity.
+              </p>
+            </div>
+            <div id="atoms-list" class="atom-library"></div>
+          </section>
+          <section id="view-models" class="view" hidden>
+            <div class="card">
+              <div class="section-row">
+                <div>
+                  <h2>Routing table</h2>
+                  <p class="muted">
+                    Discover a backend by address and port, or import your
+                    routing CSV.
+                  </p>
+                </div>
+                <button id="discover-open" class="primary">
+                  Find local models</button
+                ><label class="file-button"
+                  >Import CSV<input
+                    id="routes-file"
+                    type="file"
+                    accept=".csv" /></label
+                ><button id="download-routes">Export CSV</button>
+              </div>
+              <div class="table-scroll"><table id="routes-table"></table></div>
+              <p class="small muted">
+                These routes belong to this project. For Gemini and other
+                provider-managed endpoints, enter <code>remote</code> in the
+                address column. Local addresses may use
+                <code>localhost:1234/v1</code>. Provider model names such as
+                <code>gemini/gemini-2.5-pro</code> belong in the route column.
+              </p>
+              <div class="section-row">
+                <button id="add-route">+ Route</button
+                ><button id="test-routes">Test routes</button
+                ><span class="muted small"
+                  >API credentials use environment variable names.</span
+                >
+              </div>
+            </div>
+            <div class="split-cards">
+              <div class="card">
+                <h2>Assistant</h2>
+                <p>Model used for drafts.</p>
+                <select
+                  id="assistant-model"
+                  aria-label="Assistant model"
+                ></select
+                ><label
+                  >Draft output token limit<input
+                    id="draft-tokens"
+                    type="number"
+                    min="1"
+                    value="4096"
+                /></label>
+              </div>
+              <div class="card">
+                <h2>Supervisor</h2>
+                <p>Model used for extraction review.</p>
+                <select
+                  id="supervisor-model"
+                  aria-label="Supervisor model"
+                ></select>
+              </div>
+            </div>
+            <details class="card">
+              <summary>Model selection and public scores</summary>
+              <p>
+                Supplied public scores rank exact model aliases. Gemma4:26b is
+                the fallback preference; unknown variants require a choice.
+              </p>
+              <label class="file-button"
+                >Import benchmark scores<input
+                  id="rankings-file"
+                  type="file"
+                  accept=".json"
+              /></label>
+              <p class="small muted">
+                JSON list with model, score, source URL and date. Higher score
+                wins. Scores only match exact routing aliases.
+              </p>
+              <button id="recommend-roles">Use suggested roles</button>
+              <div id="discovery-info"></div>
+            </details>
+          </section>
+          <section id="view-fx" class="view" hidden>
+            <div class="section-row">
+              <label
+                >Module
+                <select id="fx-select"></select></label
+              ><button id="new-fx">New module</button
+              ><label class="file-button"
+                >Import Python<input
+                  id="fx-file"
+                  type="file"
+                  accept=".py" /></label
+              ><button id="save-fx" class="primary">Save module</button>
+            </div>
+            <div class="card">
+              <div class="section-row">
+                <h2 id="fx-heading">Project Python functions</h2>
+                <span id="fx-inventory" class="badge"></span>
+              </div>
+              <p class="small muted">
+                Signature: (response, chatVars). Register functions in CHAT_FX.
+              </p>
+              <textarea
+                id="fx-code"
+                class="code-editor"
+                aria-label="Python source"
+                spellcheck="false"
+              ></textarea>
+            </div>
+            <div class="card">
+              <h2>Try a function</h2>
+              <div class="section-row">
+                <label
+                  >Function
+                  <select id="test-fx-name"></select></label
+                ><label
+                  ><input id="trust-fx" type="checkbox" /> Run project
+                  Python</label
+                ><button id="test-fx">Test function</button>
+              </div>
+              <div class="split-cards">
+                <label
+                  >Response<textarea id="test-fx-text" rows="3">
+  sample text  </textarea></label
+                ><label
+                  >Variables (JSON)<textarea id="test-fx-vars" rows="3">
+{}</textarea>
+                </label>
+              </div>
+            </div>
+          </section>
+          <section id="view-runs" class="view" hidden>
+            <div class="card run-controls">
+              <div class="section-row">
+                <label
+                  >Data product
+                  <select id="output-node"></select></label
+                ><label
+                  >Workers
+                  <input
+                    id="workers"
+                    type="number"
+                    min="1"
+                    max="128"
+                    value="2" /></label
+                ><label
+                  >Timeout (s)
+                  <input
+                    id="timeout"
+                    type="number"
+                    min="1"
+                    value="1200" /></label
+                ><button id="run-start" class="primary">▷ Run input</button
+                ><button id="run-pause">Pause</button
+                ><button id="run-resume">Resume</button
+                ><button id="run-stop" class="danger">Stop</button>
+              </div>
+              <p class="small muted" id="run-input-label"></p>
+              <label
+                ><input id="run-trust-fx" type="checkbox" /> Run project Python
+                modules</label
+              >
+            </div>
+            <div class="section-row run-picker">
+              <label
+                >Run
+                <select id="run-select"></select></label
+              ><span id="run-status" class="badge">No run selected</span
+              ><button id="export-csv">Export CSV</button>
+            </div>
+            <div id="job-feedback" class="job-feedback" hidden>
+              <p id="job-message" role="status"></p>
+              <button id="job-review" class="primary" hidden>
+                Review draft
+              </button>
+              <button id="job-retry" hidden>Edit request</button>
+              <button id="job-models" hidden>Open models</button>
+              <a id="constructor-diagnostics" hidden>Download constructor diagnostics</a>
+            </div>
+            <div id="run-stats" class="stats"></div>
+            <div class="run-tabs">
+              <button data-run-tab="results" class="active">Results</button
+              ><button data-run-tab="transcript">Execution transcript</button>
+            </div>
+            <div id="run-results" class="card">
+              <p class="small muted">Click a value to read it in full.</p>
+              <div id="results-table" class="table-scroll"></div>
+              <div class="section-row">
+                <button id="results-prev">Previous</button
+                ><span id="results-page" class="muted small"></span
+                ><button id="results-next">Next</button>
+              </div>
+            </div>
+            <div id="run-transcript" class="card" hidden>
+              <div class="section-row">
+                <p class="small muted">
+                  Full prompts and responses are recorded. Expand a step to read
+                  it.
+                </p>
+                <span id="transcript-status" class="small muted"></span
+                ><a id="download-transcript">Download full transcript</a
+                ><button id="more-transcript">Load next steps</button
+                ><button id="reset-transcript">From beginning</button>
+              </div>
+              <div id="transcript"></div>
+            </div>
+          </section>
+          <section id="view-review" class="view" hidden>
+            <div class="split-cards">
+              <div class="card">
+                <h2>Review an extraction run</h2>
+                <p>Review flagged rows, or a sample of the run.</p>
+                <label
+                  >Extraction run
+                  <select id="review-run"></select></label
+                ><button id="supervisor-review" class="primary">
+                  Review with supervisor
+                </button>
+              </div>
+              <div class="card">
+                <h2>Automatic review</h2>
+                <label class="toggle"
+                  ><input id="auto-review" type="checkbox" /> Review completed
+                  runs automatically</label
+                >
+                <p class="small muted">
+                  Creates drafts for you to inspect and apply.
+                </p>
+                <label
+                  >Maximum review records
+                  <input
+                    id="review-limit"
+                    type="number"
+                    min="1"
+                    max="100"
+                    value="8"
+                /></label>
+              </div>
+            </div>
+            <details class="card">
+              <summary>CDENs used by the workbench</summary>
+              <p class="small muted">
+                Select replacement workflows from any pool. Each receives
+                request, validation_feedback and the assistant/supervisor model
+                aliases. Its return node must produce the requested JSON object.
+              </p>
+              <div id="workflow-selectors" class="split-cards"></div>
+            </details>
+            <div class="card">
+              <div class="section-row">
+                <h2>Drafts & feedback</h2>
+                <button id="refresh-review">Refresh</button>
+              </div>
+              <div id="draft-list"></div>
+            </div>
+          </section>
+        </div>
+      </main>
+    </div>
+    <div id="toast" role="status" hidden></div>
+    <dialog id="dialog" aria-labelledby="dialog-title">
+      <form id="dialog-form" method="dialog">
+        <div class="dialog-head">
+          <h2 id="dialog-title"></h2>
+          <button type="button" id="dialog-close" aria-label="Close">×</button>
+        </div>
+        <div id="dialog-body"></div>
+        <p id="dialog-error" class="field-error" role="alert" hidden></p>
+        <div class="dialog-actions">
+          <button type="button" id="dialog-cancel">Cancel</button
+          ><button id="dialog-submit" class="primary" type="submit">
+            Continue
+          </button>
+        </div>
+      </form>
+    </dialog>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

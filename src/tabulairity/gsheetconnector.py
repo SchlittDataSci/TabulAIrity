@@ -62,6 +62,9 @@ def _translateAlertColumns(df, columns=('title', 'summary'), workers=8):
         for text in df.loc[df[language_col] != tb.targetLanguage, column]:
             pending.setdefault(text, None)
 
+    print(f"[GAlerts] Translation model={tb.translationModel}, "
+          f"workers={workers}, unique texts={len(pending)}, "
+          f"reasoning={tb.translationExtraParams}")
     if pending:
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {executor.submit(tb.translateOne, text): text for text in pending}
